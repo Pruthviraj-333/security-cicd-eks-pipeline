@@ -6,6 +6,10 @@ terraform/.terraform.lock.hcl
 terraform/terraform.tfstate
 terraform/terraform.tfstate.backup
 terraform/*.tfplan
+terraform/*.tfvars
+terraform/*.tfvars.json
+*.tfvars
+*.tfvars.json
 terraform/override.tf
 terraform/override.tf.json
 terraform/*_override.tf
