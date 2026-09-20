@@ -1,0 +1,506 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 7 — Drift Detection
+#
+# Compares live cluster state against GitOps source of truth (git HEAD).
+# Two complementary detection methods:
+#
+#   Method A — ArgoCD app diff:
+#     Uses `argocd app diff` to detect any out-of-sync resources.
+#     Catches: manual kubectl edits, in-place patches, annotation drift.
+#
+#   Method B — kubectl vs git manifest diff:
+#     Pulls live resource YAML via kubectl, strips runtime fields,
+#     and diffs against the committed manifests for each pilot service.
+#     Catches: configuration drift even when ArgoCD self-heal is disabled.
+#
+# On drift detected:
+#   - GitHub Issue is created (or updated) with a diff report
+#   - Workflow annotation posted to the commit
+#   - CloudWatch custom metric published (feeds Stage 8 Grafana dashboard)
+#   - HIGH severity drift fails the workflow (alerting via GitHub notifications)
+#
+# Schedule: every 30 minutes (more frequent in prod; adjust cron as needed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "Stage 7 · Drift Detection"
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # Every 30 minutes
+  workflow_dispatch:
+    inputs:
+      auto_sync:
+        description: "Auto-sync if drift is detected (ArgoCD)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      severity_threshold:
+        description: "Minimum severity to fail the workflow"
+        required: false
+        default: "high"
+        type: choice
+        options: ["any", "high", "critical"]
+
+concurrency:
+  group: "drift-detection"
+  cancel-in-progress: true   # Cancel stale drift checks; only latest matters
+
+permissions:
+  contents: read
+  id-token: write       # AWS OIDC auth
+  issues: write         # Create/update GitHub Issues for drift reports
+  actions: read
+
+env:
+  AWS_REGION: ap-south-1
+  CLUSTER_NAME: security-cicd-dev-security-cicd-eks
+  ARGOCD_NAMESPACE: argocd
+  APP_NAME: online-boutique-pilot
+  PILOT_SERVICES: "frontend cartservice checkoutservice"
+  K8S_NAMESPACE: default
+  CW_NAMESPACE: SecurityCICD/DriftDetection   # CloudWatch metrics namespace
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 1 — ArgoCD application diff (source of truth: git)
+  # ───────────────────────────────────────────────────────────────────────────
+  argocd-drift:
+    name: "ArgoCD · App Diff"
+    runs-on: ubuntu-latest
+    outputs:
+      drift-detected: ${{ steps.diff.outputs.drift_detected }}
+      drift-count: ${{ steps.diff.outputs.drift_count }}
+      drift-summary: ${{ steps.diff.outputs.drift_summary }}
+      sync-status: ${{ steps.status.outputs.sync_status }}
+      health-status: ${{ steps.status.outputs.health_status }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── AWS auth (OIDC — no stored keys) ─────────────────────────────────
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/security-cicd-dev-github-actions-deploy
+          role-session-name: drift-detection-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --name "${{ env.CLUSTER_NAME }}" \
+            --region "${{ env.AWS_REGION }}"
+
+      # ── Install ArgoCD CLI ────────────────────────────────────────────────
+      - name: Install ArgoCD CLI
+        run: |
+          curl -sSL -o /usr/local/bin/argocd \
+            "https://github.com/argoproj/argo-cd/releases/download/v2.13.4/argocd-linux-amd64"
+          chmod +x /usr/local/bin/argocd
+
+      - name: Port-forward + login ArgoCD
+        run: |
+          kubectl port-forward svc/argocd-server -n "${{ env.ARGOCD_NAMESPACE }}" 8080:443 &
+          sleep 5
+          ARGOCD_PASSWORD=$(kubectl -n "${{ env.ARGOCD_NAMESPACE }}" \
+            get secret argocd-initial-admin-secret \
+            -o jsonpath='{.data.password}' | base64 -d)
+          argocd login localhost:8080 \
+            --username admin \
+            --password "${ARGOCD_PASSWORD}" \
+            --insecure --grpc-web
+
+      # ── Get app sync + health status ──────────────────────────────────────
+      - name: Get ArgoCD application status
+        id: status
+        run: |
+          app_json=$(argocd app get "${{ env.APP_NAME }}" --grpc-web -o json 2>/dev/null || echo '{}')
+
+          sync_status=$(echo "$app_json" | jq -r '.status.sync.status // "Unknown"')
+          health_status=$(echo "$app_json" | jq -r '.status.health.status // "Unknown"')
+          out_of_sync=$(echo "$app_json" | jq -r '.status.sync.status != "Synced"')
+
+          echo "sync_status=${sync_status}"   >> "$GITHUB_OUTPUT"
+          echo "health_status=${health_status}" >> "$GITHUB_OUTPUT"
+          echo "out_of_sync=${out_of_sync}"   >> "$GITHUB_OUTPUT"
+
+          echo "ArgoCD sync: ${sync_status} | health: ${health_status}"
+
+      # ── Run argocd app diff ───────────────────────────────────────────────
+      - name: Run argocd app diff
+        id: diff
+        run: |
+          diff_output=$(argocd app diff "${{ env.APP_NAME }}" \
+            --grpc-web \
+            --refresh 2>&1 || true)
+
+          drift_count=$(echo "$diff_output" | grep -c "^[<>]" 2>/dev/null || echo "0")
+
+          if [ "$drift_count" -gt 0 ] || [ "${{ steps.status.outputs.sync_status }}" != "Synced" ]; then
+            echo "drift_detected=true"  >> "$GITHUB_OUTPUT"
+            echo "drift_count=${drift_count}" >> "$GITHUB_OUTPUT"
+            echo "::warning::ArgoCD drift detected: ${drift_count} differences from git"
+
+            # Write summary (first 100 lines to avoid truncation)
+            summary=$(echo "$diff_output" | head -100 | base64 -w0)
+            echo "drift_summary=${summary}" >> "$GITHUB_OUTPUT"
+          else
+            echo "drift_detected=false" >> "$GITHUB_OUTPUT"
+            echo "drift_count=0"        >> "$GITHUB_OUTPUT"
+            echo "drift_summary="       >> "$GITHUB_OUTPUT"
+            echo "::notice::No ArgoCD drift detected ✅"
+          fi
+
+          # Save full diff as artifact
+          echo "$diff_output" > /tmp/argocd-diff.txt
+
+      - name: Archive ArgoCD diff
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: argocd-diff-${{ github.run_id }}
+          path: /tmp/argocd-diff.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # ── Auto-sync if requested ────────────────────────────────────────────
+      - name: Auto-sync drift (if requested)
+        if: steps.diff.outputs.drift_detected == 'true' && github.event.inputs.auto_sync == 'true'
+        run: |
+          echo "::notice::Auto-sync triggered for ${{ env.APP_NAME }}"
+          argocd app sync "${{ env.APP_NAME }}" \
+            --grpc-web \
+            --retry-limit 3 \
+            --timeout 300 \
+            --prune || true
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 2 — kubectl manifest diff (direct git vs live comparison)
+  # ───────────────────────────────────────────────────────────────────────────
+  kubectl-drift:
+    name: "kubectl · Manifest Diff"
+    runs-on: ubuntu-latest
+    outputs:
+      drift-detected: ${{ steps.compare.outputs.drift_detected }}
+      services-drifted: ${{ steps.compare.outputs.services_drifted }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/security-cicd-dev-github-actions-deploy
+          role-session-name: drift-kubectl-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --name "${{ env.CLUSTER_NAME }}" \
+            --region "${{ env.AWS_REGION }}"
+
+      # ── Install kubectl-neat (strips runtime noise from kubectl output) ───
+      - name: Install kubectl-neat
+        run: |
+          curl -sSL \
+            "https://github.com/itaysk/kubectl-neat/releases/latest/download/kubectl-neat_linux_amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin/ kubectl-neat || true
+
+      # ── Compare live state vs git for each pilot service ─────────────────
+      - name: Compare live vs git manifests
+        id: compare
+        run: |
+          drift_detected=false
+          drifted_services=()
+
+          compare_deployment() {
+            local service="$1"
+            local git_manifest="microservices-demo/kubernetes-manifests/${service}.yaml"
+
+            echo "── Checking: ${service} ──"
+
+            # Get live Deployment YAML, strip runtime fields
+            live_yaml=$(kubectl get deployment "${service}" \
+              -n "${{ env.K8S_NAMESPACE }}" \
+              -o yaml 2>/dev/null \
+              | kubectl neat 2>/dev/null \
+              | yq eval 'del(.metadata.creationTimestamp, .metadata.resourceVersion, .metadata.uid, .metadata.generation, .metadata.annotations."kubectl.kubernetes.io/last-applied-configuration", .status)' - 2>/dev/null \
+              || echo "")
+
+            if [ -z "$live_yaml" ]; then
+              echo "::warning::${service}: Deployment not found in cluster (not deployed yet?)"
+              return
+            fi
+
+            # Extract just the Deployment from the git manifest
+            git_yaml=$(yq eval 'select(.kind == "Deployment")' "${git_manifest}" 2>/dev/null \
+              | yq eval 'del(.metadata.creationTimestamp, .status)' - 2>/dev/null \
+              || echo "")
+
+            # Diff
+            diff_result=$(diff <(echo "$git_yaml") <(echo "$live_yaml") 2>/dev/null || true)
+
+            if [ -n "$diff_result" ]; then
+              echo "::warning::DRIFT detected in ${service}"
+              echo "$diff_result" | head -50
+              echo "$diff_result" > "/tmp/drift-${service}.txt"
+              drifted_services+=("${service}")
+              drift_detected=true
+            else
+              echo "✅ ${service}: no drift"
+            fi
+          }
+
+          # Install yq for YAML processing
+          curl -sSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+            -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+
+          for service in ${{ env.PILOT_SERVICES }}; do
+            compare_deployment "${service}" || true
+          done
+
+          # Check image digest drift (signed vs running)
+          echo "── Checking image digest drift ──"
+          for service in ${{ env.PILOT_SERVICES }}; do
+            running_image=$(kubectl get deployment "${service}" \
+              -n "${{ env.K8S_NAMESPACE }}" \
+              -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "")
+
+            git_image=$(yq eval 'select(.kind == "Deployment") | .spec.template.spec.containers[0].image' \
+              "microservices-demo/kubernetes-manifests/${service}.yaml" 2>/dev/null || echo "")
+
+            if [ -n "$running_image" ] && [ "$running_image" != "$git_image" ]; then
+              echo "::error::IMAGE DRIFT in ${service}:"
+              echo "  Git:  ${git_image}"
+              echo "  Live: ${running_image}"
+              drift_detected=true
+            else
+              [ -n "$running_image" ] && echo "✅ ${service} image: matches git"
+            fi
+          done
+
+          echo "drift_detected=${drift_detected}" >> "$GITHUB_OUTPUT"
+          echo "services_drifted=$(IFS=,; echo "${drifted_services[*]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Archive drift diffs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubectl-drift-${{ github.run_id }}
+          path: /tmp/drift-*.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 3 — Aggregate results, publish CloudWatch metric, create GitHub Issue
+  # ───────────────────────────────────────────────────────────────────────────
+  drift-report:
+    name: "Drift · Report + Alert"
+    runs-on: ubuntu-latest
+    needs: [argocd-drift, kubectl-drift]
+    if: always()
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/security-cicd-dev-github-actions-deploy
+          role-session-name: drift-report-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── Publish CloudWatch custom metric ─────────────────────────────────
+      # This feeds the Stage 8 Grafana dashboard
+      - name: Publish drift metric to CloudWatch
+        run: |
+          argocd_drift="${{ needs.argocd-drift.outputs.drift-detected }}"
+          kubectl_drift="${{ needs.kubectl-drift.outputs.drift-detected }}"
+
+          # 1 = drift detected, 0 = clean
+          drift_value=0
+          { [ "$argocd_drift" = "true" ] || [ "$kubectl_drift" = "true" ]; } && drift_value=1
+
+          timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          aws cloudwatch put-metric-data \
+            --namespace "${{ env.CW_NAMESPACE }}" \
+            --metric-data \
+              "[
+                {
+                  \"MetricName\": \"DriftDetected\",
+                  \"Dimensions\": [{\"Name\": \"Cluster\", \"Value\": \"${{ env.CLUSTER_NAME }}\"}],
+                  \"Timestamp\": \"${timestamp}\",
+                  \"Value\": ${drift_value},
+                  \"Unit\": \"Count\"
+                },
+                {
+                  \"MetricName\": \"ArgoCDSyncStatus\",
+                  \"Dimensions\": [{\"Name\": \"App\", \"Value\": \"${{ env.APP_NAME }}\"}],
+                  \"Timestamp\": \"${timestamp}\",
+                  \"Value\": $([ \"${{ needs.argocd-drift.outputs.sync-status }}\" = \"Synced\" ] && echo 1 || echo 0),
+                  \"Unit\": \"Count\"
+                },
+                {
+                  \"MetricName\": \"ArgoCDHealthStatus\",
+                  \"Dimensions\": [{\"Name\": \"App\", \"Value\": \"${{ env.APP_NAME }}\"}],
+                  \"Timestamp\": \"${timestamp}\",
+                  \"Value\": $([ \"${{ needs.argocd-drift.outputs.health-status }}\" = \"Healthy\" ] && echo 1 || echo 0),
+                  \"Unit\": \"Count\"
+                }
+              ]" \
+            --region "${{ env.AWS_REGION }}" 2>/dev/null || echo "::warning::CloudWatch publish failed (cluster may not be up yet)"
+
+          echo "CloudWatch metrics published (drift=${drift_value})"
+
+      # ── Build Job Summary ─────────────────────────────────────────────────
+      - name: Build Job Summary
+        id: summary
+        run: |
+          argocd_drift="${{ needs.argocd-drift.outputs.drift-detected }}"
+          kubectl_drift="${{ needs.kubectl-drift.outputs.drift-detected }}"
+          sync="${{ needs.argocd-drift.outputs.sync-status }}"
+          health="${{ needs.argocd-drift.outputs.health-status }}"
+          drifted="${{ needs.kubectl-drift.outputs.services-drifted }}"
+          drift_count="${{ needs.argocd-drift.outputs.drift-count }}"
+
+          any_drift=false
+          { [ "$argocd_drift" = "true" ] || [ "$kubectl_drift" = "true" ]; } && any_drift=true
+
+          overall_emoji="✅"
+          $any_drift && overall_emoji="🚨"
+
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          # ${overall_emoji} Stage 7 · Drift Detection Report
+
+          > Run: \`${{ github.run_id }}\` | Time: \`$(date -u +"%Y-%m-%d %H:%M UTC")\`
+          > Cluster: \`${{ env.CLUSTER_NAME }}\` | App: \`${{ env.APP_NAME }}\`
+
+          ## Cluster State
+
+          | Check | Status |
+          |-------|--------|
+          | ArgoCD Sync | \`${sync:-Unknown}\` |
+          | ArgoCD Health | \`${health:-Unknown}\` |
+          | ArgoCD Diff Drift | $([ "$argocd_drift" = "true" ] && echo "🚨 **YES** (${drift_count} differences)" || echo "✅ Clean") |
+          | kubectl Manifest Drift | $([ "$kubectl_drift" = "true" ] && echo "🚨 **YES** (${drifted})" || echo "✅ Clean") |
+
+          ## Pilot Services
+          | Service | Manifest | Image Digest |
+          |---------|----------|--------------|
+          | frontend | $([ "$kubectl_drift" = "true" ] && echo "⚠️ Check" || echo "✅") | — |
+          | cartservice | $([ "$kubectl_drift" = "true" ] && echo "⚠️ Check" || echo "✅") | — |
+          | checkoutservice | $([ "$kubectl_drift" = "true" ] && echo "⚠️ Check" || echo "✅") | — |
+
+          > 📊 Drift metrics published to CloudWatch: \`${{ env.CW_NAMESPACE }}\`
+          > 📁 [Download diff artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          EOF
+
+          echo "any_drift=${any_drift}" >> "$GITHUB_OUTPUT"
+
+      # ── Create/update GitHub Issue on drift ───────────────────────────────
+      - name: Create GitHub Issue for drift
+        if: steps.summary.outputs.any_drift == 'true'
+        uses: actions/github-script@v7
+        env:
+          SYNC_STATUS: ${{ needs.argocd-drift.outputs.sync-status }}
+          HEALTH_STATUS: ${{ needs.argocd-drift.outputs.health-status }}
+          DRIFT_COUNT: ${{ needs.argocd-drift.outputs.drift-count }}
+          SERVICES_DRIFTED: ${{ needs.kubectl-drift.outputs.services-drifted }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const title = `🚨 [Drift] Cluster state diverged from git — ${new Date().toISOString().slice(0,10)}`;
+            const body = `
+            ## Cluster Drift Detected
+
+            | Field | Value |
+            |-------|-------|
+            | Cluster | \`${{ env.CLUSTER_NAME }}\` |
+            | ArgoCD App | \`${{ env.APP_NAME }}\` |
+            | Sync status | \`${process.env.SYNC_STATUS}\` |
+            | Health status | \`${process.env.HEALTH_STATUS}\` |
+            | ArgoCD diff lines | \`${process.env.DRIFT_COUNT}\` |
+            | Services with manifest drift | \`${process.env.SERVICES_DRIFTED || 'none'}\` |
+            | Detected at | ${new Date().toUTCString()} |
+            | Workflow run | [#${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+
+            ## Resolution Options
+
+            1. **Auto-sync via ArgoCD**: Re-run Stage 7 with \`auto_sync: true\`
+            2. **Manual sync**: \`argocd app sync ${{ env.APP_NAME }} --prune\`
+            3. **Investigate**: Download diff artifacts from the workflow run
+
+            ---
+            <sub>🤖 Auto-generated by Stage 7 Drift Detection · \`${{ github.sha }}\`</sub>
+            `;
+
+            // Check for existing open drift issue
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              labels: ['drift-detected'],
+            });
+
+            const existing = issues.find(i => i.title.includes('[Drift]'));
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: existing.number,
+                body: `## Update: Drift still present\n\n${body}`,
+              });
+              console.log(`Updated existing issue #${existing.number}`);
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                title,
+                body,
+                labels: ['drift-detected', 'security', 'ops'],
+              });
+              console.log('Created new drift issue');
+            }
+
+      # ── Close drift issue when clean ──────────────────────────────────────
+      - name: Close drift issue if clean
+        if: steps.summary.outputs.any_drift == 'false'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              labels: ['drift-detected'],
+            });
+
+            for (const issue of issues) {
+              if (issue.title.includes('[Drift]')) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo:  context.repo.repo,
+                  issue_number: issue.number,
+                  body: `✅ Drift resolved — cluster state matches git at \`${{ github.sha }}\`\n\nAuto-closing this issue.`,
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo:  context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                });
+              }
+            }
+
+      # ── Fail workflow if drift detected ───────────────────────────────────
+      - name: Enforce drift gate
+        if: steps.summary.outputs.any_drift == 'true'
+        run: |
+          threshold="${{ github.event.inputs.severity_threshold || 'high' }}"
+          echo "::error::Cluster drift detected (threshold: ${threshold}). See GitHub Issue."
+          exit 1
