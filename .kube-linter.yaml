@@ -1,0 +1,65 @@
+# .kube-linter.yaml — kube-linter configuration for security-cicd-eks-pipeline
+# Docs: https://docs.kubelinter.io/#/configuration
+#
+# Strategy: use the "do-not-auto-add-defaults" base, then explicitly enable
+# the checks we care about. This gives full visibility and control.
+
+customChecks: []
+
+checks:
+  # ── Start from the default security template ─────────────────────────────
+  doNotAutoAddDefaults: false
+
+  # ── Explicitly add checks beyond the default set ─────────────────────────
+  addAllBuiltIn: false
+
+  include:
+    # ── Security context ────────────────────────────────────────────────────
+    - run-as-non-root                  # containers must set runAsNonRoot: true
+    - run-as-user                      # runAsUser must be set and > 0
+    - no-read-only-root-fs             # readOnlyRootFilesystem must be true
+    - privilege-escalation-container   # allowPrivilegeEscalation must be false
+    - privileged-container             # privileged must be false
+    - no-capabilities                  # containers should drop ALL capabilities
+
+    # ── Host namespace isolation ─────────────────────────────────────────────
+    - host-pid                         # hostPID must not be true
+    - host-ipc                         # hostIPC must not be true
+    - host-network                     # hostNetwork must not be true
+    - privileged-ports                 # containerPort < 1024 requires privileges
+
+    # ── Resource management ──────────────────────────────────────────────────
+    - cpu-request                      # cpu requests must be set
+    - memory-request                   # memory requests must be set
+    - cpu-limit                        # cpu limits must be set
+    - memory-limit                     # memory limits must be set
+
+    # ── Reliability / ops ────────────────────────────────────────────────────
+    - liveness-probe                   # livenessProbe must be configured
+    - readiness-probe                  # readinessProbe must be configured
+    - minimum-three-replicas           # warn if replicas < 3 (HA)
+
+    # ── Image hygiene ────────────────────────────────────────────────────────
+    - latest-tag                       # image tag must not be "latest" or missing
+    - no-extensions-v1beta             # avoid deprecated API versions
+
+    # ── RBAC / access control ────────────────────────────────────────────────
+    - wildcard-in-rules                # RBAC rules must not use wildcard verbs/resources
+    - sa-token-automount               # serviceAccountToken.automountServiceAccountToken
+    - access-to-secrets                # RBAC rules must not grant broad secret access
+
+    # ── Miscellaneous ────────────────────────────────────────────────────────
+    - default-service-account          # don't use default service account
+    - env-var-secret                   # secrets shouldn't be in plain env vars
+    - writable-host-mount              # host path mounts shouldn't be writable
+
+  # ── Checks to exclude (with documented rationale) ────────────────────────
+  exclude:
+    # Demo app deploys to 'default' namespace — tracked, will fix in our K8s overlay
+    - default-namespace
+
+# ── Ignored objects (demo app test fixtures, not real workloads) ──────────
+ignoredObjectGenerators: []
+
+# ── Custom check definitions (add project-specific checks here) ──────────
+# None yet — rely on built-in checks above

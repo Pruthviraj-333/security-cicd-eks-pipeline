@@ -1,0 +1,70 @@
+# .checkov.yaml — Checkov configuration for security-cicd-eks-pipeline
+# Docs: https://www.checkov.io/2.Basics/CLI%20Command%20Reference.html
+
+# ── Directories to scan (override per-invocation in CI) ───────────────────
+# directory:
+#   - terraform/
+#   - microservices-demo/kubernetes-manifests/
+
+# ── Output ────────────────────────────────────────────────────────────────
+compact: true
+quiet: false
+download-external-modules: false
+
+# ── Severity threshold: only report MEDIUM and above ────────────────────
+# (LOW findings are still captured in JSON artifacts for Stage 8 dashboard)
+check:
+  - CKV_K8S_30    # seccompProfile must be configured
+  - CKV_K8S_36    # readOnlyRootFilesystem
+  - CKV_K8S_37    # Minimize the admission of containers with added capability
+  - CKV_K8S_28    # Do not admit containers wishing to share the host network namespace
+  - CKV_K8S_8     # Liveness Probe
+  - CKV_K8S_9     # Readiness Probe
+  - CKV_K8S_11    # CPU limits
+  - CKV_K8S_12    # Memory limits
+  - CKV_K8S_13    # CPU requests
+  - CKV_K8S_14    # Image tag should not be latest
+  - CKV_K8S_15    # Image pull policy: IfNotPresent or Never on fixed tags
+  - CKV_K8S_16    # Do not admit containers with added capability
+  - CKV_K8S_17    # Do not admit containers wishing to share the host process ID namespace
+  - CKV_K8S_18    # Do not admit containers wishing to share the host IPC namespace
+  - CKV_K8S_20    # Containers should not run with allowPrivilegeEscalation
+  - CKV_K8S_22    # Use read-only filesystem for containers where possible
+  - CKV_K8S_25    # Do not admit containers with dangerous capabilities
+  - CKV_K8S_28    # Do not admit containers wishing to share the host network namespace
+  - CKV_K8S_29    # Do not admit containers with dangerous capabilities
+  - CKV_K8S_30    # Apply Seccomp profile
+  - CKV_K8S_31    # Ensure that the Kubernetes Dashboard is not deployed
+  - CKV_K8S_35    # Prefer using secrets as files over secrets as environment variables
+  - CKV_K8S_40    # Containers should run as a high UID to avoid host conflict
+  - CKV2_K8S_6    # Ensure that all Namespaced resources have a NetworkPolicy defined
+  # Terraform AWS (EKS)
+  - CKV_AWS_58    # EKS secrets encryption
+  - CKV_AWS_37    # EKS logging enabled
+  - CKV_AWS_38    # EKS endpoint public access restricted
+  - CKV_AWS_39    # EKS endpoint private access enabled
+  - CKV_AWS_58    # EKS secrets encryption
+  - CKV_AWS_65    # EKS cluster has control plane logging
+  - CKV_AWS_79    # EKS node group uses launch template
+  - CKV_AWS_172   # EKS cluster has security group
+  - CKV_AWS_337   # EKS node group uses encrypted EBS
+  - CKV2_AWS_26   # EKS cluster has a service account token
+  # Terraform general
+  - CKV_TF_1      # Ensure Terraform module sources use a commit hash
+  - CKV_TF_2      # Ensure Terraform module sources use a tag
+
+# ── Skip list: known-accepted risks or non-applicable checks ──────────────
+# These are skipped globally; use inline suppressions for file-specific skips
+skip-check:
+  # The upstream demo app intentionally uses no namespace (default ns for demo)
+  - CKV_K8S_21    # Do not use default namespace (demo app; we'll fix in our overlay)
+  # Demo app uses emptyDir for redis — noted, tracked in docs/
+  - CKV_K8S_70    # Prefer persistentVolumeClaim over emptyDir (known demo limitation)
+  # frontend-external LoadBalancer is intentional for demo access
+  - CKV_K8S_25    # Ensure that Service type is not NodePort (LB is intentional)
+
+# ── Soft fail: always exit 0 (workflow controls blocking, not checkov exit code)
+soft-fail: true
+
+# ── Suppression comment format: use checkov suppress inline in YAML ───────
+# Example: # checkov:skip=CKV_K8S_14:Image tag is pinned in CI build process

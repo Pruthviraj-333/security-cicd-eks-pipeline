@@ -1,0 +1,689 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 4 — Infrastructure-as-Code (IaC) Security Scanning
+#
+# Tools:
+#   Checkov      → Terraform (terraform/) + K8s manifests (kubernetes-manifests/)
+#   kube-linter  → K8s manifests — Kubernetes-specific best-practices
+#   tfsec        → Terraform — AWS-specific security rules (when TF is written)
+#
+# Targets:
+#   Terraform:   security-cicd-eks-pipeline/terraform/   (our EKS TF, not upstream)
+#   K8s:         microservices-demo/kubernetes-manifests/ (pilot services only)
+#   Helm:        microservices-demo/helm-chart/           (full chart)
+#
+# Failure policy:
+#   CRITICAL / HIGH → fail (blocks merge)
+#   MEDIUM / LOW    → warn, upload artifact, continue
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "Stage 4 · IaC Security Scanning"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "microservices-demo/kubernetes-manifests/**"
+      - "microservices-demo/helm-chart/**"
+      - ".checkov.yaml"
+      - ".kube-linter.yaml"
+      - ".github/workflows/stage4-iac-scan.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "microservices-demo/kubernetes-manifests/**"
+      - "microservices-demo/helm-chart/**"
+      - ".checkov.yaml"
+      - ".kube-linter.yaml"
+      - ".github/workflows/stage4-iac-scan.yml"
+
+concurrency:
+  group: "iac-scan-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write   # SARIF upload
+  pull-requests: write     # PR comment
+  actions: read
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 1 — Checkov: Terraform + Kubernetes + Helm scanning
+  # ───────────────────────────────────────────────────────────────────────────
+  checkov-scan:
+    name: "Checkov · Terraform + K8s + Helm"
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.set-outcome.outputs.outcome }}
+      tf-failed: ${{ steps.set-outcome.outputs.tf_failed }}
+      k8s-failed: ${{ steps.set-outcome.outputs.k8s_failed }}
+      tf-high: ${{ steps.parse.outputs.tf_high }}
+      k8s-high: ${{ steps.parse.outputs.k8s_high }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Install Checkov ──────────────────────────────────────────────────
+      - name: Set up Python + install Checkov
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Checkov
+        run: pip install checkov --quiet
+
+      # ── Scan: Terraform (our EKS terraform/) ────────────────────────────
+      # Only runs if terraform/ has actual .tf files (graceful skip if empty)
+      - name: Checkov — Terraform scan
+        id: checkov-tf
+        run: |
+          tf_count=$(find terraform/ -name "*.tf" 2>/dev/null | wc -l || echo "0")
+          echo "Terraform .tf file count: ${tf_count}"
+
+          if [ "$tf_count" -eq 0 ]; then
+            echo "No Terraform files found in terraform/ — skipping TF scan"
+            echo '{"results":{"failed_checks":[],"passed_checks":[]}}' > checkov-terraform.json
+            exit 0
+          fi
+
+          checkov \
+            --directory terraform/ \
+            --config-file .checkov.yaml \
+            --framework terraform \
+            --output json \
+            --output-file checkov-terraform.json \
+            --soft-fail \
+            --compact \
+            2>&1 | tail -5 || true
+
+          checkov \
+            --directory terraform/ \
+            --config-file .checkov.yaml \
+            --framework terraform \
+            --output sarif \
+            --output-file checkov-terraform.sarif \
+            --soft-fail \
+            2>&1 | tail -5 || true
+        continue-on-error: true
+
+      # ── Scan: Kubernetes manifests (pilot services) ───────────────────
+      - name: Checkov — Kubernetes manifests scan
+        id: checkov-k8s
+        run: |
+          checkov \
+            --directory microservices-demo/kubernetes-manifests/ \
+            --config-file .checkov.yaml \
+            --framework kubernetes \
+            --output json \
+            --output-file checkov-k8s.json \
+            --soft-fail \
+            --compact \
+            2>&1 | tail -5 || true
+
+          checkov \
+            --directory microservices-demo/kubernetes-manifests/ \
+            --config-file .checkov.yaml \
+            --framework kubernetes \
+            --output sarif \
+            --output-file checkov-k8s.sarif \
+            --soft-fail \
+            2>&1 | tail -5 || true
+        continue-on-error: true
+
+      # ── Scan: Helm chart ─────────────────────────────────────────────
+      - name: Checkov — Helm chart scan
+        id: checkov-helm
+        run: |
+          checkov \
+            --directory microservices-demo/helm-chart/ \
+            --config-file .checkov.yaml \
+            --framework helm \
+            --output json \
+            --output-file checkov-helm.json \
+            --soft-fail \
+            --compact \
+            2>&1 | tail -5 || true
+        continue-on-error: true
+
+      # ── Parse results and count HIGH/CRITICAL ────────────────────────
+      - name: Parse Checkov results
+        id: parse
+        run: |
+          count_high() {
+            local f="$1"
+            [ ! -s "$f" ] && echo "0" && return
+            jq '[
+              .results.failed_checks[]?
+              | select(
+                  (.check_result.result == "failed") and
+                  (
+                    (.severity // "MEDIUM") == "HIGH" or
+                    (.severity // "MEDIUM") == "CRITICAL"
+                  )
+                )
+            ] | length' "$f" 2>/dev/null || echo "0"
+          }
+
+          count_total() {
+            local f="$1"
+            [ ! -s "$f" ] && echo "0" && return
+            jq '.results.failed_checks | length' "$f" 2>/dev/null || echo "0"
+          }
+
+          tf_high=$(count_high "checkov-terraform.json")
+          tf_total=$(count_total "checkov-terraform.json")
+          k8s_high=$(count_high "checkov-k8s.json")
+          k8s_total=$(count_total "checkov-k8s.json")
+          helm_high=$(count_high "checkov-helm.json")
+          helm_total=$(count_total "checkov-helm.json")
+
+          echo "tf_high=${tf_high}"     >> "$GITHUB_OUTPUT"
+          echo "tf_total=${tf_total}"   >> "$GITHUB_OUTPUT"
+          echo "k8s_high=${k8s_high}"   >> "$GITHUB_OUTPUT"
+          echo "k8s_total=${k8s_total}" >> "$GITHUB_OUTPUT"
+          echo "helm_high=${helm_high}" >> "$GITHUB_OUTPUT"
+          echo "helm_total=${helm_total}" >> "$GITHUB_OUTPUT"
+
+          echo "TF:   total=${tf_total},  HIGH=${tf_high}"
+          echo "K8s:  total=${k8s_total}, HIGH=${k8s_high}"
+          echo "Helm: total=${helm_total}, HIGH=${helm_high}"
+
+          # Print top HIGH findings per category
+          for label in terraform k8s helm; do
+            f="checkov-${label}.json"
+            [ ! -s "$f" ] && continue
+            echo "── TOP HIGH/CRITICAL in ${label} ──"
+            jq -r '.results.failed_checks[]?
+              | select((.severity // "MEDIUM") == "HIGH" or (.severity // "MEDIUM") == "CRITICAL")
+              | "[\(.severity // "?")] \(.check_id) — \(.check_result.evaluated_keys // [] | join(", ") | .[0:60]) (\(.repo_file_path // .file_path // "?"))"
+            ' "$f" 2>/dev/null | head -15 || true
+          done
+
+      # ── Upload SARIFs ────────────────────────────────────────────────
+      - name: Upload Terraform SARIF
+        if: always() && hashFiles('checkov-terraform.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-terraform.sarif
+          category: "checkov-terraform"
+
+      - name: Upload K8s SARIF
+        if: always() && hashFiles('checkov-k8s.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-k8s.sarif
+          category: "checkov-kubernetes"
+
+      # ── Archive all Checkov artifacts ───────────────────────────────
+      - name: Archive Checkov results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-results
+          path: |
+            checkov-terraform.json
+            checkov-terraform.sarif
+            checkov-k8s.json
+            checkov-k8s.sarif
+            checkov-helm.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # ── Set outcome ──────────────────────────────────────────────────
+      - name: Set outcome
+        id: set-outcome
+        run: |
+          tf_high=${{ steps.parse.outputs.tf_high || 0 }}
+          k8s_high=${{ steps.parse.outputs.k8s_high || 0 }}
+          helm_high=${{ steps.parse.outputs.helm_high || 0 }}
+
+          tf_failed=false;  [ "$tf_high" -gt 0 ]  && tf_failed=true
+          k8s_failed=false; [ "$k8s_high" -gt 0 ] && k8s_failed=true
+
+          echo "tf_failed=${tf_failed}"   >> "$GITHUB_OUTPUT"
+          echo "k8s_failed=${k8s_failed}" >> "$GITHUB_OUTPUT"
+
+          total_high=$((tf_high + k8s_high + helm_high))
+          if [ "$total_high" -gt 0 ]; then
+            echo "outcome=FAIL" >> "$GITHUB_OUTPUT"
+            echo "::error::Checkov found ${total_high} HIGH/CRITICAL IaC issue(s). Merge blocked."
+            exit 1
+          fi
+          echo "outcome=PASS" >> "$GITHUB_OUTPUT"
+          echo "::notice::Checkov: no HIGH/CRITICAL IaC findings ✅"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 2 — kube-linter: Kubernetes manifest linting (best practices + security)
+  # Focused on pilot services: frontend, cartservice, checkoutservice
+  # ───────────────────────────────────────────────────────────────────────────
+  kube-linter-scan:
+    name: "kube-linter · K8s Best Practices"
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.set-outcome.outputs.outcome }}
+      error-count: ${{ steps.parse.outputs.error_count }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Install kube-linter ───────────────────────────────────────────
+      - name: Install kube-linter
+        run: |
+          KL_VERSION="0.7.2"
+          curl -sSfL \
+            "https://github.com/stackrox/kube-linter/releases/download/v${KL_VERSION}/kube-linter-linux.tar.gz" \
+            | tar -xz -C /usr/local/bin/ kube-linter
+          kube-linter version
+
+      # ── Lint pilot service manifests ─────────────────────────────────
+      - name: Run kube-linter (pilot services)
+        id: lint
+        run: |
+          kube-linter lint \
+            microservices-demo/kubernetes-manifests/frontend.yaml \
+            microservices-demo/kubernetes-manifests/cartservice.yaml \
+            microservices-demo/kubernetes-manifests/checkoutservice.yaml \
+            --config .kube-linter.yaml \
+            --format json \
+            > kube-linter-results.json 2>&1 || true
+
+          echo "kube-linter exit code: $?"
+          cat kube-linter-results.json | jq '.Summary // {}' 2>/dev/null || true
+        continue-on-error: true
+
+      # ── Also produce plain-text for readability in logs ──────────────
+      - name: Run kube-linter (plain text log)
+        run: |
+          kube-linter lint \
+            microservices-demo/kubernetes-manifests/frontend.yaml \
+            microservices-demo/kubernetes-manifests/cartservice.yaml \
+            microservices-demo/kubernetes-manifests/checkoutservice.yaml \
+            --config .kube-linter.yaml \
+            2>&1 | tee kube-linter-results.txt || true
+        continue-on-error: true
+
+      # ── Convert kube-linter JSON to SARIF manually ───────────────────
+      - name: Convert kube-linter to SARIF
+        id: convert
+        run: |
+          python3 - << 'PYEOF'
+          import json, sys
+
+          try:
+              with open("kube-linter-results.json") as f:
+                  data = json.load(f)
+          except Exception:
+              data = {"Reports": []}
+
+          reports = data.get("Reports") or []
+
+          sarif = {
+              "version": "2.1.0",
+              "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json",
+              "runs": [{
+                  "tool": {
+                      "driver": {
+                          "name": "kube-linter",
+                          "version": "0.7.2",
+                          "rules": []
+                      }
+                  },
+                  "results": []
+              }]
+          }
+
+          rule_ids = set()
+          for r in reports:
+              check   = r.get("Check", "unknown")
+              msg     = r.get("Diagnostic", {}).get("Message", "No message")
+              obj     = r.get("Object", {}).get("Metadata", {})
+              fp      = obj.get("FilePath", "unknown")
+              line    = 1
+
+              if check not in rule_ids:
+                  rule_ids.add(check)
+                  sarif["runs"][0]["tool"]["driver"]["rules"].append({
+                      "id": check,
+                      "name": check,
+                      "shortDescription": {"text": check},
+                      "properties": {"tags": ["kubernetes", "security"]}
+                  })
+
+              sarif["runs"][0]["results"].append({
+                  "ruleId": check,
+                  "level": "warning",
+                  "message": {"text": msg},
+                  "locations": [{
+                      "physicalLocation": {
+                          "artifactLocation": {"uri": fp, "uriBaseId": "%SRCROOT%"},
+                          "region": {"startLine": line}
+                      }
+                  }]
+              })
+
+          with open("kube-linter-results.sarif", "w") as f:
+              json.dump(sarif, f, indent=2)
+
+          print(f"Converted {len(reports)} kube-linter findings to SARIF")
+          PYEOF
+        continue-on-error: true
+
+      # ── Parse results ────────────────────────────────────────────────
+      - name: Parse kube-linter results
+        id: parse
+        run: |
+          f="kube-linter-results.json"
+          if [ ! -s "$f" ]; then
+            echo "error_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          count=$(jq '.Reports | length' "$f" 2>/dev/null || echo "0")
+          echo "error_count=${count}" >> "$GITHUB_OUTPUT"
+          echo "kube-linter findings: ${count}"
+
+          # Print findings grouped by check name
+          jq -r '.Reports[]? | "[\(.Check)] \(.Object.Metadata.Name // "?") (\(.Object.Metadata.FilePath // "?")): \(.Diagnostic.Message // "")"' \
+            "$f" 2>/dev/null | sort | head -40 || true
+
+      # ── Upload SARIF ─────────────────────────────────────────────────
+      - name: Upload kube-linter SARIF
+        if: always() && hashFiles('kube-linter-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: kube-linter-results.sarif
+          category: "kube-linter"
+
+      # ── Archive ──────────────────────────────────────────────────────
+      - name: Archive kube-linter results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kube-linter-results
+          path: |
+            kube-linter-results.json
+            kube-linter-results.sarif
+            kube-linter-results.txt
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # ── Set outcome ───────────────────────────────────────────────────
+      # kube-linter failures are WARNING-level; we block only on enabled
+      # checks marked as ERROR in our .kube-linter.yaml config
+      - name: Set outcome
+        id: set-outcome
+        run: |
+          count=${{ steps.parse.outputs.error_count || 0 }}
+          # Check for any checks we've designated as blocking (see .kube-linter.yaml)
+          blocking=0
+          if [ -s "kube-linter-results.json" ]; then
+            blocking=$(jq '[.Reports[]? | select(
+              .Check == "privileged-ports" or
+              .Check == "run-as-non-root" or
+              .Check == "privilege-escalation-container" or
+              .Check == "wildcard-in-rules" or
+              .Check == "host-pid" or
+              .Check == "host-ipc" or
+              .Check == "host-network"
+            )] | length' kube-linter-results.json 2>/dev/null || echo "0")
+          fi
+
+          echo "Total findings: ${count}, Blocking findings: ${blocking}"
+
+          if [ "$blocking" -gt 0 ]; then
+            echo "outcome=FAIL" >> "$GITHUB_OUTPUT"
+            echo "::error::kube-linter found ${blocking} blocking security check failure(s). Merge blocked."
+            exit 1
+          fi
+
+          [ "$count" -gt 0 ] && echo "::warning::kube-linter found ${count} advisory finding(s). Review recommended."
+          echo "outcome=PASS" >> "$GITHUB_OUTPUT"
+          echo "::notice::kube-linter: no blocking findings ✅"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 3 — tfsec: AWS-specific Terraform security rules
+  # Gracefully skips if no .tf files exist yet in terraform/
+  # ───────────────────────────────────────────────────────────────────────────
+  tfsec-scan:
+    name: "tfsec · Terraform AWS Rules"
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.set-outcome.outputs.outcome }}
+      critical-count: ${{ steps.parse.outputs.critical_count }}
+      high-count: ${{ steps.parse.outputs.high_count }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for Terraform files
+        id: tf-check
+        run: |
+          count=$(find terraform/ -name "*.tf" 2>/dev/null | wc -l || echo "0")
+          echo "tf_count=${count}" >> "$GITHUB_OUTPUT"
+          echo "Terraform .tf files in terraform/: ${count}"
+
+      - name: Run tfsec
+        if: steps.tf-check.outputs.tf_count != '0'
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: terraform/
+          additional_args: >-
+            --format json
+            --out tfsec-results.json
+            --minimum-severity HIGH
+            --include-passed
+            --soft-fail
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Run tfsec SARIF output
+        if: steps.tf-check.outputs.tf_count != '0'
+        run: |
+          docker run --rm \
+            -v "$PWD/terraform:/src" \
+            aquasec/tfsec:latest \
+            --format sarif \
+            --minimum-severity HIGH \
+            --soft-fail \
+            /src > tfsec-results.sarif 2>/dev/null || true
+        continue-on-error: true
+
+      - name: Skip message (no TF files yet)
+        if: steps.tf-check.outputs.tf_count == '0'
+        run: |
+          echo "::notice::No Terraform files in terraform/ yet — tfsec scan skipped. Will activate once EKS Terraform is written."
+          echo '{"results":[]}' > tfsec-results.json
+
+      - name: Parse tfsec results
+        id: parse
+        run: |
+          f="tfsec-results.json"
+          if [ ! -s "$f" ]; then
+            echo "critical_count=0" >> "$GITHUB_OUTPUT"
+            echo "high_count=0"     >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          critical=$(jq '[.results[]? | select(.severity == "CRITICAL")] | length' "$f" 2>/dev/null || echo "0")
+          high=$(jq '[.results[]? | select(.severity == "HIGH")] | length' "$f" 2>/dev/null || echo "0")
+          echo "critical_count=${critical}" >> "$GITHUB_OUTPUT"
+          echo "high_count=${high}"         >> "$GITHUB_OUTPUT"
+          echo "tfsec: CRITICAL=${critical}, HIGH=${high}"
+
+          jq -r '.results[]? | select(.severity == "CRITICAL" or .severity == "HIGH") |
+            "[\(.severity)] \(.rule_id) — \(.description) (\(.location.filename // "?"):\(.location.start_line // "?"))"
+          ' "$f" 2>/dev/null | head -20 || true
+
+      - name: Upload tfsec SARIF
+        if: always() && hashFiles('tfsec-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: tfsec-results.sarif
+          category: "tfsec"
+
+      - name: Archive tfsec results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfsec-results
+          path: |
+            tfsec-results.json
+            tfsec-results.sarif
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Set outcome
+        id: set-outcome
+        run: |
+          critical=${{ steps.parse.outputs.critical_count || 0 }}
+          high=${{ steps.parse.outputs.high_count || 0 }}
+          tf_count=${{ steps.tf-check.outputs.tf_count || 0 }}
+
+          if [ "$tf_count" -eq 0 ]; then
+            echo "outcome=SKIPPED" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$((critical + high))" -gt 0 ]; then
+            echo "outcome=FAIL" >> "$GITHUB_OUTPUT"
+            echo "::error::tfsec found ${critical} CRITICAL + ${high} HIGH Terraform issues. Merge blocked."
+            exit 1
+          fi
+          echo "outcome=PASS" >> "$GITHUB_OUTPUT"
+          echo "::notice::tfsec: no HIGH/CRITICAL Terraform findings ✅"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 4 — IaC Report Aggregator
+  # ───────────────────────────────────────────────────────────────────────────
+  iac-report:
+    name: "IaC · Summary Report"
+    runs-on: ubuntu-latest
+    needs: [checkov-scan, kube-linter-scan, tfsec-scan]
+    if: always()
+
+    steps:
+      - name: Build Job Summary
+        id: summary
+        env:
+          CK_OUTCOME: ${{ needs.checkov-scan.outputs.outcome }}
+          CK_TF_HIGH: ${{ needs.checkov-scan.outputs.tf-high }}
+          CK_K8S_HIGH: ${{ needs.checkov-scan.outputs.k8s-high }}
+          KL_OUTCOME: ${{ needs.kube-linter-scan.outputs.outcome }}
+          KL_ERRORS: ${{ needs.kube-linter-scan.outputs.error-count }}
+          TF_OUTCOME: ${{ needs.tfsec-scan.outputs.outcome }}
+          TF_CRIT: ${{ needs.tfsec-scan.outputs.critical-count }}
+          TF_HIGH: ${{ needs.tfsec-scan.outputs.high-count }}
+        run: |
+          ck="${CK_OUTCOME:-UNKNOWN}"
+          kl="${KL_OUTCOME:-UNKNOWN}"
+          tf="${TF_OUTCOME:-UNKNOWN}"
+
+          ck_emoji="✅"; [ "$ck" = "FAIL" ] && ck_emoji="🚨"
+          kl_emoji="✅"; [ "$kl" = "FAIL" ] && kl_emoji="🚨"
+          tf_emoji="✅"; [ "$tf" = "FAIL" ] && tf_emoji="🚨"
+          [ "$tf" = "SKIPPED" ] && tf_emoji="⏭️"
+
+          failed=false
+          { [ "$ck" = "FAIL" ] || [ "$kl" = "FAIL" ] || [ "$tf" = "FAIL" ]; } && failed=true
+
+          overall_emoji="✅"
+          overall_text="**No HIGH/CRITICAL IaC findings — merge allowed**"
+          $failed && overall_emoji="🚨" && overall_text="**HIGH/CRITICAL IaC findings detected — merge BLOCKED**"
+
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          # ${overall_emoji} Stage 4 · IaC Security Scan Report
+
+          > Commit: \`${{ github.sha }}\` | Branch: \`${{ github.ref_name }}\`
+          > Scanned: \`terraform/\` · \`kubernetes-manifests/\` · \`helm-chart/\`
+
+          ## ${overall_text}
+
+          | Tool | Scope | Status | HIGH | CRITICAL |
+          |------|-------|--------|------|----------|
+          | ${ck_emoji} Checkov (TF) | Terraform | \`${ck}\` | ${CK_TF_HIGH:-0} | — |
+          | ${ck_emoji} Checkov (K8s) | K8s manifests | \`${ck}\` | ${CK_K8S_HIGH:-0} | — |
+          | ${kl_emoji} kube-linter | K8s manifests | \`${kl}\` | ${KL_ERRORS:-0} findings | — |
+          | ${tf_emoji} tfsec | Terraform (AWS) | \`${tf}\` | ${TF_HIGH:-0} | ${TF_CRIT:-0} |
+
+          > 🔒 [View SARIF in Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
+          > 📁 [Download scan artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ### Key checks (Checkov K8s)
+          | Check | Description | Severity |
+          |-------|-------------|----------|
+          | CKV_K8S_30 | seccompProfile must be set | HIGH |
+          | CKV_K8S_8 | Liveness probe required | MEDIUM |
+          | CKV_K8S_9 | Readiness probe required | MEDIUM |
+          | CKV_K8S_14 | Image should not use \`latest\` tag | LOW |
+          | CKV_K8S_28 | No NET_RAW capability | MEDIUM |
+          | CKV_K8S_36 | Immutable root filesystem | HIGH |
+          | CKV2_K8S_6 | NetworkPolicy required | HIGH |
+          EOF
+
+          $failed && echo "overall=FAIL" >> "$GITHUB_OUTPUT" || echo "overall=PASS" >> "$GITHUB_OUTPUT"
+
+      - name: Post PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          CK_OUTCOME: ${{ needs.checkov-scan.outputs.outcome }}
+          CK_TF_HIGH: ${{ needs.checkov-scan.outputs.tf-high }}
+          CK_K8S_HIGH: ${{ needs.checkov-scan.outputs.k8s-high }}
+          KL_OUTCOME: ${{ needs.kube-linter-scan.outputs.outcome }}
+          KL_ERRORS: ${{ needs.kube-linter-scan.outputs.error-count }}
+          TF_OUTCOME: ${{ needs.tfsec-scan.outputs.outcome }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const ck = process.env.CK_OUTCOME || 'UNKNOWN';
+            const kl = process.env.KL_OUTCOME || 'UNKNOWN';
+            const tf = process.env.TF_OUTCOME || 'UNKNOWN';
+
+            const failed = ck === 'FAIL' || kl === 'FAIL' || tf === 'FAIL';
+            const ckEmoji = ck === 'FAIL'      ? '🚨' : '✅';
+            const klEmoji = kl === 'FAIL'      ? '🚨' : '✅';
+            const tfEmoji = tf === 'SKIPPED'   ? '⏭️' : tf === 'FAIL' ? '🚨' : '✅';
+
+            const body = `
+            ## ${failed ? '🚨' : '✅'} Stage 4 · IaC Security Scanning
+
+            ${failed ? '**HIGH/CRITICAL IaC findings — merge BLOCKED**' : '**No HIGH/CRITICAL IaC findings — merge allowed**'}
+
+            | Tool | Scope | Status | HIGH |
+            |------|-------|--------|------|
+            | ${ckEmoji} Checkov (TF) | Terraform | \`${ck}\` | ${process.env.CK_TF_HIGH || 0} |
+            | ${ckEmoji} Checkov (K8s) | K8s manifests | \`${ck}\` | ${process.env.CK_K8S_HIGH || 0} |
+            | ${klEmoji} kube-linter | K8s manifests | \`${kl}\` | ${process.env.KL_ERRORS || 0} |
+            | ${tfEmoji} tfsec | Terraform (AWS) | \`${tf}\` | — |
+
+            > 🔒 [Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
+
+            <sub>🤖 Stage 4 IaC Scan · \`${{ github.sha }}\`</sub>
+            `;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Stage 4 · IaC')
+            );
+            const fn = existing ? 'updateComment' : 'createComment';
+            await github.rest.issues[fn]({
+              owner: context.repo.owner, repo: context.repo.repo,
+              ...(existing ? { comment_id: existing.id } : { issue_number: context.issue.number }),
+              body,
+            });
+
+      - name: Enforce merge gate
+        if: always()
+        run: |
+          if [ "${{ steps.summary.outputs.overall }}" = "FAIL" ]; then
+            echo "::error::IaC gate FAILED. Check Security tab for findings."
+            exit 1
+          fi
+          echo "::notice::IaC gate PASSED ✅"
