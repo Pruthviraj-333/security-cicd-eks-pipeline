@@ -368,7 +368,7 @@ resource "kubernetes_config_map" "grafana_dashboard_security" {
             defaults = {
               thresholds = {
                 steps = [
-                  { color = "green", value = 0 }
+                  { color = "green", value = 0 },
                   { color = "red",   value = 1 }
                 ]
               }
@@ -391,7 +391,7 @@ resource "kubernetes_config_map" "grafana_dashboard_security" {
           fieldConfig = {
             defaults = {
               mappings = [
-                { type = "value", options = { "0" = { text = "Out of Sync", color = "red" } } }
+                { type = "value", options = { "0" = { text = "Out of Sync", color = "red" } } },
                 { type = "value", options = { "1" = { text = "Synced",      color = "green" } } }
               ]
             }
@@ -464,7 +464,7 @@ resource "kubernetes_config_map" "grafana_dashboard_gitops" {
               color = { mode = "thresholds" }
               thresholds = {
                 steps = [
-                  { color = "green", value = 0 }
+                  { color = "green", value = 0 },
                   { color = "red",   value = 1 }
                 ]
               }
