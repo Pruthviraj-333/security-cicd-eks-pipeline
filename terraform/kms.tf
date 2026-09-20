@@ -106,7 +106,7 @@ data "aws_iam_policy_document" "kms_eks_policy" {
     effect = "Allow"
     principals {
       type        = "AWS"
-      identifiers = [aws_iam_role.node_group.arn]
+      identifiers = ["arn:aws:iam::${var.aws_account_id}:role/${local.name_prefix}-ebs-csi"]
     }
     actions = [
       "kms:Encrypt",
@@ -115,6 +115,25 @@ data "aws_iam_policy_document" "kms_eks_policy" {
       "kms:GenerateDataKey*",
       "kms:CreateGrant",
       "kms:DescribeKey",
+    ]
+    resources = ["*"]
+  }
+
+  # Allow Auto Scaling to use the key for EBS encryption
+  statement {
+    sid    = "AutoScalingEBSEncryption"
+    effect = "Allow"
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${var.aws_account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"]
+    }
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:CreateGrant",
+      "kms:DescribeKey"
     ]
     resources = ["*"]
   }

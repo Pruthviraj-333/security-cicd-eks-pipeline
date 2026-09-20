@@ -23,8 +23,8 @@ resource "kubernetes_namespace" "monitoring" {
     name = var.monitoring_namespace
     labels = {
       "app.kubernetes.io/name"             = "monitoring"
-      "pod-security.kubernetes.io/enforce" = "baseline"
-      "pod-security.kubernetes.io/audit"   = "restricted"
+      "pod-security.kubernetes.io/enforce" = "privileged"
+      "pod-security.kubernetes.io/audit"   = "privileged"
     }
   }
   depends_on = [module.eks]
@@ -38,7 +38,7 @@ resource "helm_release" "kube_prometheus_stack" {
   version          = "67.9.0"
   namespace        = kubernetes_namespace.monitoring.metadata[0].name
   create_namespace = false
-  atomic           = true
+  atomic           = false
   cleanup_on_fail  = true
   wait             = true
   timeout          = 600
@@ -57,11 +57,9 @@ resource "helm_release" "kube_prometheus_stack" {
           }
         }
 
-        # Persistence (use EBS PVC for dashboards + data)
+        # Persistence disabled for dev — avoids SQLite schema conflicts on PVC reuse
         persistence = {
-          enabled          = true
-          storageClassName = "gp3-encrypted"
-          size             = "10Gi"
+          enabled = false
         }
 
         resources = {
@@ -213,7 +211,7 @@ resource "helm_release" "loki" {
   version          = "6.25.0"
   namespace        = kubernetes_namespace.monitoring.metadata[0].name
   create_namespace = false
-  atomic           = true
+  atomic           = false
   cleanup_on_fail  = true
   wait             = true
   timeout          = 300
@@ -259,6 +257,15 @@ resource "helm_release" "loki" {
         }
       }
 
+      backend = { replicas = 0 }
+      read    = { replicas = 0 }
+      write   = { replicas = 0 }
+
+      lokiCanary   = { enabled = false }
+      chunksCache  = { enabled = false }
+      resultsCache = { enabled = false }
+      test         = { enabled = false }
+
       # Promtail scrapes pod logs and ships to Loki
       gateway = {
         enabled = true
@@ -277,7 +284,7 @@ resource "helm_release" "promtail" {
   version          = "6.16.6"
   namespace        = kubernetes_namespace.monitoring.metadata[0].name
   create_namespace = false
-  atomic           = true
+  atomic           = false
   cleanup_on_fail  = true
   wait             = true
   timeout          = 300

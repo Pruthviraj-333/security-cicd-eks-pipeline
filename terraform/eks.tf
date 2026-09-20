@@ -27,8 +27,10 @@ module "eks" {
   version = "~> 20.31"
 
   # ── Cluster identity ───────────────────────────────────────────────────────
-  cluster_name    = local.cluster_name
-  cluster_version = var.cluster_version
+  cluster_name             = local.cluster_name
+  cluster_version          = var.cluster_version
+  iam_role_use_name_prefix = false
+  iam_role_name            = "${local.cluster_name}-cluster"
 
   # ── Networking ─────────────────────────────────────────────────────────────
   vpc_id                   = aws_vpc.main.id
@@ -79,6 +81,10 @@ module "eks" {
       # Enable network policy support (security hardening)
       configuration_values = jsonencode({
         enableNetworkPolicy = "true"
+        env = {
+          ENABLE_PREFIX_DELEGATION = "true"
+          WARM_PREFIX_TARGET       = "1"
+        }
       })
     }
     aws-ebs-csi-driver = {
@@ -89,7 +95,10 @@ module "eks" {
 
   # ── Managed Node Groups ────────────────────────────────────────────────────
   eks_managed_node_groups = {
-    "${local.name_prefix}-nodes" = {
+    "${local.name_prefix}-nodes-v2" = {
+      iam_role_use_name_prefix = false
+      iam_role_name            = "${local.name_prefix}-node-group-v2"
+
       instance_types = var.node_group_instance_types
       ami_type       = var.node_group_ami_type
       capacity_type  = var.node_group_capacity_type

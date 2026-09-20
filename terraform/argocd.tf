@@ -166,9 +166,8 @@ resource "helm_release" "argocd_app_pilot" {
 
   values = [
     yamlencode({
-      applications = [
-        {
-          name       = "online-boutique-pilot"
+      applications = {
+        "online-boutique-pilot" = {
           namespace  = var.argocd_namespace
           project    = "default"
           finalizers = ["resources-finalizer.argocd.argoproj.io"]
@@ -206,7 +205,7 @@ resource "helm_release" "argocd_app_pilot" {
             }
           }
         }
-      ]
+      }
     })
   ]
 
