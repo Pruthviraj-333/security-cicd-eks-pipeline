@@ -82,9 +82,9 @@ jobs:
         id: gosec
         working-directory: microservices-demo/src/${{ matrix.service }}
         run: |
-          # Suppress known false positives / demo accepted risks (G104 unhandled error, G114 ListenAndServe timeout, G115 int overflow, G304 static fileserver path, G402 demo gRPC creds)
+          # Suppress known false positives / demo accepted risks (G104 unhandled error, G114 ListenAndServe timeout, G115 int overflow, G304 static fileserver path, G402 demo gRPC creds, G404 random ad selection, G704 internal microservice HTTP call)
           gosec \
-            -exclude=G104,G114,G115,G304,G402 \
+            -exclude=G104,G114,G115,G304,G402,G404,G704 \
             -fmt sarif \
             -out gosec-${{ matrix.service }}.sarif \
             -severity medium \
@@ -99,7 +99,7 @@ jobs:
         working-directory: microservices-demo/src/${{ matrix.service }}
         run: |
           gosec \
-            -exclude=G104,G114,G115,G304,G402 \
+            -exclude=G104,G114,G115,G304,G402,G404,G704 \
             -fmt json \
             -out gosec-${{ matrix.service }}.json \
             -severity medium \
