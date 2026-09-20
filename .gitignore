@@ -1,0 +1,52 @@
+# security-cicd-eks-pipeline — root .gitignore
+
+# ── Terraform ──────────────────────────────────────────────────────────────
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/*.tfplan
+terraform/override.tf
+terraform/override.tf.json
+terraform/*_override.tf
+terraform/*_override.tf.json
+
+# ── Secrets / credentials (NEVER commit these) ─────────────────────────────
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+.env
+.env.*
+!.env.example
+kubeconfig
+kubeconfig.*
+*-kubeconfig.yaml
+aws-credentials
+.aws/credentials
+
+# ── ArgoCD / GitOps ────────────────────────────────────────────────────────
+argocd-secret.yaml
+argocd-initial-admin-secret.txt
+
+# ── Cosign ────────────────────────────────────────────────────────────────
+cosign.key
+cosign.pub
+
+# ── Scan result caches (artifacts uploaded to GH Actions, not committed) ──
+*.sarif
+trufflehog-results.json
+gitleaks-results.sarif
+grype-results.json
+trivy-results.sarif
+
+# ── OS / editor ───────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/settings.json
+*.code-workspace

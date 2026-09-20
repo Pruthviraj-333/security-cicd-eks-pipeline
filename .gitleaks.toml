@@ -1,0 +1,108 @@
+# .gitleaks.toml — Gitleaks configuration for security-cicd-eks-pipeline
+# Docs: https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml
+
+title = "security-cicd-eks-pipeline gitleaks config"
+
+# ─── Allowlists ───────────────────────────────────────────────────────────────
+# Suppress known-safe test fixtures and demo credentials in the upstream app
+
+[allowlist]
+  description = "Global allowlists for microservices-demo test fixtures"
+
+  # Files that are explicitly demo/test and may contain fake credentials
+  paths = [
+    '''microservices-demo/src/frontend/templates''',
+    '''microservices-demo/kubernetes-manifests''',
+    '''microservices-demo/helm-chart''',
+    '''microservices-demo/release''',
+    '''.*_test\.go$''',
+    '''.*\.test\.(js|ts)$''',
+    '''.*_test\.py$''',
+    '''.*Tests\.cs$''',
+  ]
+
+  # Known safe commit SHAs (populate as needed during development)
+  commits = []
+
+  # Regex patterns that are provably false-positive in this repo
+  regexes = [
+    # OpenTelemetry demo resource attributes (not real credentials)
+    '''OTEL_RESOURCE_ATTRIBUTES''',
+    # GCP project IDs used in demo documentation
+    '''your-project-id''',
+    '''my-project''',
+  ]
+
+# ─── Extend baseline rules ────────────────────────────────────────────────────
+[extend]
+  # Pull in the full default ruleset as a baseline
+  useDefault = true
+
+# ─── Custom rules ─────────────────────────────────────────────────────────────
+
+[[rules]]
+  id          = "aws-access-key"
+  description = "AWS Access Key ID"
+  regex       = '''(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}'''
+  tags        = ["aws", "cloud", "high"]
+  severity    = "HIGH"
+
+  [rules.allowlist]
+    regexes = ['''EXAMPLE''', '''SAMPLE''', '''DUMMY''', '''FAKE''']
+
+[[rules]]
+  id          = "aws-secret-access-key"
+  description = "AWS Secret Access Key"
+  regex       = '''(?i)aws.{0,20}?(?:secret|private).{0,20}?['\"]([0-9a-zA-Z\/+]{40})['\"]'''
+  tags        = ["aws", "cloud", "high"]
+  severity    = "HIGH"
+
+[[rules]]
+  id          = "github-pat"
+  description = "GitHub Personal Access Token"
+  regex       = '''ghp_[0-9a-zA-Z]{36}'''
+  tags        = ["github", "high"]
+  severity    = "HIGH"
+
+[[rules]]
+  id          = "github-oauth"
+  description = "GitHub OAuth Token"
+  regex       = '''gho_[0-9a-zA-Z]{36}'''
+  tags        = ["github", "high"]
+  severity    = "HIGH"
+
+[[rules]]
+  id          = "gcp-service-account-key"
+  description = "GCP Service Account private_key field"
+  regex       = '''"private_key":\s*"-----BEGIN RSA PRIVATE KEY-----'''
+  tags        = ["gcp", "cloud", "critical"]
+  severity    = "CRITICAL"
+
+[[rules]]
+  id          = "generic-api-key"
+  description = "Generic high-entropy API key assignment"
+  regex       = '''(?i)(?:api[_-]?key|apikey|api[_-]?token|access[_-]?token)\s*[:=]\s*['\"]([a-zA-Z0-9_\-]{20,})['\"]'''
+  entropy     = 3.5
+  tags        = ["generic", "medium"]
+  severity    = "MEDIUM"
+
+[[rules]]
+  id          = "private-key-pem"
+  description = "Private key PEM block"
+  regex       = '''-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'''
+  tags        = ["pki", "critical"]
+  severity    = "CRITICAL"
+
+[[rules]]
+  id          = "docker-auth-config"
+  description = "Docker config.json auth block with credentials"
+  regex       = '''"auth":\s*"[a-zA-Z0-9+/]{20,}={0,2}"'''
+  tags        = ["docker", "medium"]
+  severity    = "MEDIUM"
+
+[[rules]]
+  id          = "kubernetes-secret-data"
+  description = "Base64-encoded value in a Kubernetes Secret manifest"
+  regex       = '''(?i)kind:\s*Secret[\s\S]{0,200}data:\s*\{[\s\S]{0,500}[a-zA-Z0-9+/]{40,}={0,2}'''
+  tags        = ["kubernetes", "medium"]
+  severity    = "MEDIUM"

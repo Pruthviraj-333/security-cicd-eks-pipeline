@@ -1,0 +1,24 @@
+# .trufflehog-exclude.txt
+# Paths excluded from TruffleHog scanning (relative to repo root)
+# Format: one path prefix per line (glob patterns supported)
+
+# Upstream demo app fixtures — known-safe test/demo values
+microservices-demo/kubernetes-manifests/
+microservices-demo/helm-chart/
+microservices-demo/release/
+microservices-demo/docs/
+
+# Test files across all languages
+**/*_test.go
+**/*.test.js
+**/*.test.ts
+**/*_test.py
+**/*Tests.cs
+**/*Spec.cs
+
+# Generated proto files
+microservices-demo/src/**/genproto/
+
+# Node modules / vendor (should not be in repo, but exclude defensively)
+**/node_modules/
+**/vendor/
