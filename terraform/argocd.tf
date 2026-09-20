@@ -154,74 +154,61 @@ resource "helm_release" "argocd" {
   ]
 }
 
-# ── ArgoCD Application: pilot services ───────────────────────────────────────
-# This creates the ArgoCD Application resource pointing at our git repo.
-# ArgoCD will continuously sync the K8s manifests from GitHub to the cluster.
-resource "kubernetes_manifest" "argocd_app_pilot" {
-  manifest = {
-    apiVersion = "argoproj.io/v1alpha1"
-    kind       = "Application"
+# ── ArgoCD Application: pilot services (deployed via argocd-apps Helm chart) ──
+# Deployed via Helm so that Terraform can plan cleanly before the cluster and
+# CRDs exist (kubernetes_manifest requires a live API connection at plan time).
+resource "helm_release" "argocd_app_pilot" {
+  name       = "online-boutique-pilot-app"
+  repository = "https://argoproj.github.io/argo-helm"
+  chart      = "argocd-apps"
+  version    = "~> 2.0"
+  namespace  = var.argocd_namespace
 
-    metadata = {
-      name      = "online-boutique-pilot"
-      namespace = var.argocd_namespace
-      labels = {
-        "app.kubernetes.io/name"    = "online-boutique-pilot"
-        "app.kubernetes.io/part-of" = "security-cicd-eks-pipeline"
-      }
-      finalizers = ["resources-finalizer.argocd.argoproj.io"]
-    }
+  values = [
+    yamlencode({
+      applications = [
+        {
+          name       = "online-boutique-pilot"
+          namespace  = var.argocd_namespace
+          project    = "default"
+          finalizers = ["resources-finalizer.argocd.argoproj.io"]
 
-    spec = {
-      project = "default"
+          source = {
+            repoURL        = "https://github.com/Pruthviraj-333/security-cicd-eks-pipeline.git"
+            targetRevision = "HEAD"
+            path           = "microservices-demo/kubernetes-manifests"
+          }
 
-      source = {
-        repoURL        = "https://github.com/Pruthviraj-333/security-cicd-eks-pipeline.git"
-        targetRevision = "HEAD"
-        path           = "microservices-demo/kubernetes-manifests"
-      }
+          destination = {
+            server    = "https://kubernetes.default.svc"
+            namespace = "default"
+          }
 
-      destination = {
-        server    = "https://kubernetes.default.svc"
-        namespace = "default"
-      }
-
-      syncPolicy = {
-        automated = {
-          prune    = true   # Remove resources not in git
-          selfHeal = true   # Re-apply if someone manually edits the cluster
-        }
-        syncOptions = [
-          "Validate=true",
-          "CreateNamespace=false",
-          "PrunePropagationPolicy=foreground",
-          "PruneLast=true",
-          "ApplyOutOfSyncOnly=true",
-        ]
-        retry = {
-          limit = 5
-          backoff = {
-            duration    = "5s"
-            factor      = 2
-            maxDuration = "3m"
+          syncPolicy = {
+            automated = {
+              prune    = true
+              selfHeal = true
+            }
+            syncOptions = [
+              "Validate=true",
+              "CreateNamespace=false",
+              "PrunePropagationPolicy=foreground",
+              "PruneLast=true",
+              "ApplyOutOfSyncOnly=true"
+            ]
+            retry = {
+              limit = 5
+              backoff = {
+                duration    = "5s"
+                factor      = 2
+                maxDuration = "3m"
+              }
+            }
           }
         }
-      }
-
-      # Image update strategy — use the signed images from Stage 5
-      # ArgoCD Image Updater will watch for new digests in GHCR
-      info = [
-        {
-          name  = "registry"
-          value = "ghcr.io/pruthviraj-333"
-        },
-        {
-          name  = "signed-by"
-          value = "cosign-keyless-oidc"
-        }
       ]
-    }
-  }
+    })
+  ]
 
   depends_on = [helm_release.argocd]
 }
