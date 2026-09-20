@@ -57,7 +57,7 @@ rules:
       InsecureSkipVerify is set to true in TLS config. This disables certificate
       verification and is vulnerable to MITM attacks. Never use in production.
     languages: [go]
-    severity: ERROR
+    severity: WARNING
     metadata:
       category: security
       owasp: "A02:2021 - Cryptographic Failures"

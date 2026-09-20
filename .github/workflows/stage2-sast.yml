@@ -82,7 +82,11 @@ jobs:
         id: gosec
         working-directory: microservices-demo/src/${{ matrix.service }}
         run: |
+          # Use per-service gosec.yaml to suppress known false positives in demo code
+          CONFIG_FLAG=""
+          [ -f gosec.yaml ] && CONFIG_FLAG="-conf gosec.yaml"
           gosec \
+            ${CONFIG_FLAG} \
             -fmt sarif \
             -out gosec-${{ matrix.service }}.sarif \
             -severity medium \
@@ -96,7 +100,10 @@ jobs:
       - name: Also run gosec as JSON (for counting)
         working-directory: microservices-demo/src/${{ matrix.service }}
         run: |
+          CONFIG_FLAG=""
+          [ -f gosec.yaml ] && CONFIG_FLAG="-conf gosec.yaml"
           gosec \
+            ${CONFIG_FLAG} \
             -fmt json \
             -out gosec-${{ matrix.service }}.json \
             -severity medium \

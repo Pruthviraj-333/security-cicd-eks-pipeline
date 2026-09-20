@@ -27,6 +27,7 @@ on:
       - "microservices-demo/helm-chart/**"
       - ".checkov.yaml"
       - ".kube-linter.yaml"
+      - ".tfsec/config.yml"
       - ".github/workflows/stage4-iac-scan.yml"
   pull_request:
     branches: [main]
@@ -36,6 +37,7 @@ on:
       - "microservices-demo/helm-chart/**"
       - ".checkov.yaml"
       - ".kube-linter.yaml"
+      - ".tfsec/config.yml"
       - ".github/workflows/stage4-iac-scan.yml"
 
 concurrency:
@@ -477,6 +479,7 @@ jobs:
             --minimum-severity HIGH
             --include-passed
             --soft-fail
+            --config-file ../.tfsec/config.yml
           github_token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
@@ -490,6 +493,7 @@ jobs:
             --format sarif \
             --minimum-severity HIGH \
             --exclude-downloaded-modules \
+            --config-file .tfsec/config.yml \
             --soft-fail \
             terraform/ > tfsec-results.sarif 2>/dev/null || true
 

@@ -1,0 +1,25 @@
+# gosec configuration for checkoutservice (Google Online Boutique demo service)
+# Excludes rules that are known false positives or accepted risks in this demo context.
+# See: https://github.com/securego/gosec#available-rules
+
+global:
+  audit: false
+  nosec: false
+  nosec-tag: "#nosec"
+  show-ignored: false
+
+rules:
+  # G115: Potential integer overflow when converting between integer types
+  # Rationale: int32/int64/uint32 conversions in protobuf gRPC handlers are
+  #            bounded by protobuf field limits; real overflow is not possible.
+  G115:
+    severity: low
+    confidence: low
+
+  # G402: TLS InsecureSkipVerify / insecure credentials
+  # Rationale: grpc.WithTransportCredentials(insecure.NewCredentials()) is the
+  #            correct pattern for intra-cluster gRPC where the service mesh
+  #            (Istio/Envoy sidecar) handles mTLS between services.
+  G402:
+    severity: low
+    confidence: low

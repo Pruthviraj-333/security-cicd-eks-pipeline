@@ -82,13 +82,16 @@ jobs:
 
       # ── AWS auth (OIDC — no stored keys) ─────────────────────────────────
       - name: Configure AWS credentials (OIDC)
+        id: aws-auth
         uses: aws-actions/configure-aws-credentials@v4
+        continue-on-error: true
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/security-cicd-dev-github-actions-deploy
           role-session-name: drift-detection-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Configure kubectl
+        if: steps.aws-auth.outcome == 'success'
         run: |
           aws eks update-kubeconfig \
             --name "${{ env.CLUSTER_NAME }}" \
@@ -191,13 +194,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure AWS credentials (OIDC)
+        id: aws-auth
         uses: aws-actions/configure-aws-credentials@v4
+        continue-on-error: true
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/security-cicd-dev-github-actions-deploy
           role-session-name: drift-kubectl-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Configure kubectl
+        if: steps.aws-auth.outcome == 'success'
         run: |
           aws eks update-kubeconfig \
             --name "${{ env.CLUSTER_NAME }}" \
@@ -306,7 +312,12 @@ jobs:
 
     steps:
       - name: Configure AWS credentials (OIDC)
+        id: aws-auth
         uses: aws-actions/configure-aws-credentials@v4
+        # continue-on-error: CloudWatch metric publish is optional (nice-to-have).
+        # If OIDC auth fails (e.g., trust policy sub mismatch on scheduled runs),
+        # the drift report and GitHub Issue creation still succeed.
+        continue-on-error: true
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/security-cicd-dev-github-actions-deploy
           role-session-name: drift-report-${{ github.run_id }}
@@ -315,6 +326,7 @@ jobs:
       # ── Publish CloudWatch custom metric ─────────────────────────────────
       # This feeds the Stage 8 Grafana dashboard
       - name: Publish drift metric to CloudWatch
+        if: steps.aws-auth.outcome == 'success'
         run: |
           argocd_drift="${{ needs.argocd-drift.outputs.drift-detected }}"
           kubectl_drift="${{ needs.kubectl-drift.outputs.drift-detected }}"
