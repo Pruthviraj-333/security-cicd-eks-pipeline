@@ -1,0 +1,64 @@
+# cosign.policy.yaml — Cosign verification policy
+#
+# This file is used by:
+#   1. The stage5-image-sign.yml workflow (verify step)
+#   2. Future admission webhook / Kyverno policy to enforce signed images at deploy time
+#   3. ArgoCD image updater signature checks (Stage 6)
+#
+# Docs: https://docs.sigstore.dev/cosign/verifying/verify/
+
+---
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: security-cicd-eks-pipeline-signing-policy
+  annotations:
+    description: "Require all pilot service images to be signed by the CI pipeline"
+    owner: "Pruthviraj-333"
+
+spec:
+  images:
+    # Match all images from our GHCR namespace
+    - glob: "ghcr.io/pruthviraj-333/frontend*"
+    - glob: "ghcr.io/pruthviraj-333/cartservice*"
+    - glob: "ghcr.io/pruthviraj-333/checkoutservice*"
+
+  authorities:
+    - name: "github-actions-oidc"
+      keyless:
+        # GitHub Actions OIDC issuer
+        url: https://fulcio.sigstore.dev
+        identities:
+          - issuer: https://token.actions.githubusercontent.com
+            # The subject must match our specific workflow file
+            subjectRegExp: "^https://github.com/Pruthviraj-333/security-cicd-eks-pipeline/.github/workflows/stage5-image-sign.yml@refs/heads/main$"
+
+      # Require Rekor transparency log entry
+      ctlog:
+        url: https://rekor.sigstore.dev
+
+      # Require SBOM attestation
+      attestations:
+        - name: sbom-spdx
+          predicateType: https://spdx.dev/Document
+          policy:
+            type: cue
+            data: |
+              // Validate that SBOM has at least 1 package
+              import "list"
+              predicateType: "https://spdx.dev/Document"
+              predicate: {
+                packages: list.MinItems(1)
+              }
+
+        - name: slsa-provenance
+          predicateType: https://slsa.dev/provenance/v0.2
+          policy:
+            type: cue
+            data: |
+              // Validate SLSA provenance comes from our repo
+              predicateType: "https://slsa.dev/provenance/v0.2"
+              predicate: {
+                builder: id: =~"^https://github.com/actions/runner"
+                invocation: configSource: uri: =~"^https://github.com/Pruthviraj-333/security-cicd-eks-pipeline"
+              }
