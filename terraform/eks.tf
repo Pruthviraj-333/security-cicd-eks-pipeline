@@ -49,10 +49,11 @@ module "eks" {
   cloudwatch_log_group_kms_key_id        = aws_kms_key.eks.arn
 
   # ── Secrets encryption (CKV_AWS_58) ───────────────────────────────────────
-  cluster_encryption_config = var.enable_secrets_encryption ? {
+  create_kms_key = false
+  cluster_encryption_config = {
     resources        = ["secrets"]
     provider_key_arn = aws_kms_key.eks.arn
-  } : {}
+  }
 
   # ── OIDC provider (required for IRSA) ─────────────────────────────────────
   enable_irsa = true
