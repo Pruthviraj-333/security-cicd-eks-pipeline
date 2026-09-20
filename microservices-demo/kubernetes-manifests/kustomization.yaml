@@ -26,14 +26,35 @@ resources:
  - productcatalogservice.yaml
  - recommendationservice.yaml
  - shippingservice.yaml
-# components:
-# - ../kustomize/components/cymbal-branding
-# - ../kustomize/components/google-cloud-operations
-# - ../kustomize/components/memorystore
-# - ../kustomize/components/network-policies
-# - ../kustomize/components/alloydb
-# - ../kustomize/components/shopping-assistant
-# - ../kustomize/components/spanner
-# - ../kustomize/components/container-images-tag
-# - ../kustomize/components/container-images-tag-suffix
-# - ../kustomize/components/container-images-registry
+images:
+  - name: adservice
+    newName: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/adservice
+    newTag: v0.10.7
+  - name: cartservice
+    newName: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/cartservice
+    newTag: v0.10.7
+  - name: checkoutservice
+    newName: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/checkoutservice
+    newTag: v0.10.7
+  - name: currencyservice
+    newName: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/currencyservice
+    newTag: v0.10.7
+  - name: emailservice
+    newName: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/emailservice
+    newTag: v0.10.7
+  - name: frontend
+    newName: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/frontend
+    newTag: v0.10.7
+  - name: paymentservice
+    newName: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/paymentservice
+    newTag: v0.10.7
+  - name: productcatalogservice
+    newName: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/productcatalogservice
+    newTag: v0.10.7
+  - name: recommendationservice
+    newName: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/recommendationservice
+    newTag: v0.10.7
+  - name: shippingservice
+    newName: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/shippingservice
+    newTag: v0.10.7
+
