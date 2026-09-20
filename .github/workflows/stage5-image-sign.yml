@@ -178,7 +178,7 @@ jobs:
             --oidc-issuer https://token.actions.githubusercontent.com \
             "${IMAGE_REF}"
 
-          echo "✅ Image signed successfully"
+          echo "Image signed successfully"
           echo "::notice::Image signed: ${IMAGE_REF}"
 
       # ── Attach custom attestation (build metadata) ────────────────────────
@@ -286,8 +286,8 @@ jobs:
             | jq '.[0] | {subject: .optional.Subject, issuer: .optional.Issuer, signingTime: .optional.SigningTime}' \
             2>/dev/null || true
 
-          echo "✅ Signature verified successfully"
-          echo "::notice::✅ ${{ matrix.service }} image signature verified — supply chain intact"
+          echo "Signature verified successfully"
+          echo "::notice::${{ matrix.service }} image signature verified — supply chain intact"
 
       # ── Summary: print image digest and signing info ──────────────────────
       - name: Print image signing summary
@@ -296,16 +296,16 @@ jobs:
           DIGEST: ${{ steps.build-push.outputs.digest }}
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          ## ✅ ${{ matrix.service }}
+          ## ${{ matrix.service }}
 
           | Field | Value |
           |-------|-------|
           | Image | \`${{ env.REGISTRY }}/${{ env.REGISTRY_OWNER }}/${{ matrix.service }}\` |
           | Digest | \`${DIGEST}\` |
           | Tags | \`${{ steps.meta.outputs.tags }}\` |
-          | Signed | ✅ Cosign keyless OIDC (Rekor transparency log) |
-          | SBOM | ✅ SPDX JSON attached as OCI attestation |
-          | Provenance | ✅ SLSA build provenance attestation |
+          | Signed | Cosign keyless OIDC (Rekor transparency log) |
+          | SBOM | SPDX JSON attached as OCI attestation |
+          | Provenance | SLSA build provenance attestation |
           | Rekor entry | [sigstore.dev/rekor](https://rekor.sigstore.dev/) |
           EOF
 
@@ -352,9 +352,9 @@ jobs:
               --certificate-oidc-issuer "${OIDC_ISSUER}" \
               --certificate-identity-regexp "${CERT_REGEXP}" \
               "${IMAGE}" > /dev/null 2>&1; then
-              echo "::notice::✅ ${service}: signature valid"
+              echo "::notice::${service}: signature valid"
             else
-              echo "::error::❌ ${service}: signature verification FAILED"
+              echo "::error::${service}: signature verification FAILED"
               all_passed=false
             fi
           done
@@ -364,14 +364,14 @@ jobs:
             exit 1
           fi
 
-          echo "::notice::All 3 service images verified ✅ — supply chain intact"
+          echo "::notice::All 3 service images verified — supply chain intact"
 
       - name: Build final summary
         if: always()
         run: |
           matrix_result="${{ needs.build-sign.result }}"
           cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          # 🔏 Stage 5 · Supply-Chain Signing Report
+          # Stage 5 · Supply-Chain Signing Report
 
           > Commit: \`${{ github.sha }}\` | Branch: \`${{ github.ref_name }}\`
           > Registry: \`ghcr.io/pruthviraj-333/\`
@@ -390,9 +390,9 @@ jobs:
 
           | Service | Language | Base Image | Status |
           |---------|----------|------------|--------|
-          | frontend | Go 1.27 | gcr.io/distroless/static | ${{ needs.build-sign.result == 'success' && '✅ Signed' || '❌ Failed' }} |
-          | cartservice | C# .NET 10 | mcr.microsoft.com/dotnet/runtime-deps:chiseled | ${{ needs.build-sign.result == 'success' && '✅ Signed' || '❌ Failed' }} |
-          | checkoutservice | Go 1.27 | gcr.io/distroless/static | ${{ needs.build-sign.result == 'success' && '✅ Signed' || '❌ Failed' }} |
+          | frontend | Go 1.27 | gcr.io/distroless/static | ${{ needs.build-sign.result == 'success' && 'Signed' || 'Failed' }} |
+          | cartservice | C# .NET 10 | mcr.microsoft.com/dotnet/runtime-deps:chiseled | ${{ needs.build-sign.result == 'success' && 'Signed' || 'Failed' }} |
+          | checkoutservice | Go 1.27 | gcr.io/distroless/static | ${{ needs.build-sign.result == 'success' && 'Signed' || 'Failed' }} |
 
           ## Verifying Signatures Locally
 

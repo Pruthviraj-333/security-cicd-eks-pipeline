@@ -132,7 +132,7 @@ jobs:
             exit 1
           fi
           echo "outcome=PASS" >> "$GITHUB_OUTPUT"
-          echo "::notice::govulncheck: no vulnerabilities in ${{ matrix.service }} ✅"
+          echo "::notice::govulncheck: no vulnerabilities in ${{ matrix.service }} [PASS]"
 
   # ───────────────────────────────────────────────────────────────────────────
   # JOB 2 — dotnet vulnerable packages: .NET SCA for cartservice
@@ -220,7 +220,7 @@ jobs:
             exit 1
           fi
           echo "outcome=PASS" >> "$GITHUB_OUTPUT"
-          echo "::notice::dotnet: no Critical/High vulnerable NuGet packages ✅"
+          echo "::notice::dotnet: no Critical/High vulnerable NuGet packages [PASS]"
 
   # ───────────────────────────────────────────────────────────────────────────
   # JOB 3 — Trivy: Filesystem SCA across all 3 services (CVE + secrets + misconfig)
@@ -295,7 +295,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Security
         if: always() && hashFiles('trivy-${{ matrix.service }}.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-${{ matrix.service }}.sarif
           category: "trivy-${{ matrix.service }}"
@@ -322,7 +322,7 @@ jobs:
             exit 1
           fi
           echo "outcome=PASS" >> "$GITHUB_OUTPUT"
-          echo "::notice::Trivy: no CRITICAL/HIGH CVEs in ${{ matrix.service }} ✅"
+          echo "::notice::Trivy: no CRITICAL/HIGH CVEs in ${{ matrix.service }} [PASS]"
 
   # ───────────────────────────────────────────────────────────────────────────
   # JOB 4 — SCA Report Aggregator
@@ -350,19 +350,19 @@ jobs:
           dn="${DN_OUTCOME:-UNKNOWN}"
           tr="${TR_OUTCOME:-unknown}"
 
-          gv_emoji="✅"; [ "$gv" = "failure" ] && gv_emoji="🚨"
-          dn_emoji="✅"; [ "$dn" = "FAIL"    ] && dn_emoji="🚨"
-          tr_emoji="✅"; [ "$tr" = "failure" ] && tr_emoji="🚨"
+          gv_badge="[PASS]"; [ "$gv" = "failure" ] && gv_badge="[FAIL]"
+          dn_badge="[PASS]"; [ "$dn" = "FAIL"    ] && dn_badge="[FAIL]"
+          tr_badge="[PASS]"; [ "$tr" = "failure" ] && tr_badge="[FAIL]"
 
           failed=false
           { [ "$gv" = "failure" ] || [ "$dn" = "FAIL" ] || [ "$tr" = "failure" ]; } && failed=true
 
-          overall_emoji="✅"
+          overall_badge="[PASS]"
           overall_text="**No CRITICAL/HIGH CVEs — merge allowed**"
-          $failed && overall_emoji="🚨" && overall_text="**CRITICAL/HIGH CVEs detected — merge BLOCKED**"
+          $failed && overall_badge="[FAIL]" && overall_text="**CRITICAL/HIGH CVEs detected — merge BLOCKED**"
 
           cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          # ${overall_emoji} Stage 3 · SCA Report
+          # ${overall_badge} Stage 3 · SCA Report
 
           > Commit: \`${{ github.sha }}\` | Branch: \`${{ github.ref_name }}\`
           > Services: \`frontend\` (Go) · \`checkoutservice\` (Go) · \`cartservice\` (C#/.NET)
@@ -371,12 +371,12 @@ jobs:
 
           | Tool | Scope | Status | CRITICAL | HIGH |
           |------|-------|--------|----------|------|
-          | ${gv_emoji} govulncheck | Go modules | \`${gv}\` | — | ${GV_VULNS:-0} |
-          | ${dn_emoji} dotnet list --vulnerable | NuGet | \`${dn}\` | ${DN_CRIT:-0} | ${DN_HIGH:-0} |
-          | ${tr_emoji} Trivy (fs) | All languages | \`${tr}\` | ${TR_CRIT:-0} | ${TR_HIGH:-0} |
+          | govulncheck (${gv_badge}) | Go modules | \`${gv}\` | — | ${GV_VULNS:-0} |
+          | dotnet list --vulnerable (${dn_badge}) | NuGet | \`${dn}\` | ${DN_CRIT:-0} | ${DN_HIGH:-0} |
+          | Trivy (fs) (${tr_badge}) | All languages | \`${tr}\` | ${TR_CRIT:-0} | ${TR_HIGH:-0} |
 
-          > 🔒 [View SARIF in Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
-          > 📁 [Download artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          > [View SARIF in Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
+          > [Download artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
           EOF
 
           $failed && echo "overall=FAIL" >> "$GITHUB_OUTPUT" || echo "overall=PASS" >> "$GITHUB_OUTPUT"
@@ -400,24 +400,24 @@ jobs:
             const trOutcome = process.env.TR_OUTCOME || 'unknown';
 
             const failed = gvOutcome === 'failure' || dnOutcome === 'FAIL' || trOutcome === 'failure';
-            const gvEmoji = gvOutcome === 'failure' ? '🚨' : '✅';
-            const dnEmoji = dnOutcome === 'FAIL'    ? '🚨' : '✅';
-            const trEmoji = trOutcome === 'failure' ? '🚨' : '✅';
+            const gvBadge = gvOutcome === 'failure' ? '[FAIL]' : '[PASS]';
+            const dnBadge = dnOutcome === 'FAIL'    ? '[FAIL]' : '[PASS]';
+            const trBadge = trOutcome === 'failure' ? '[FAIL]' : '[PASS]';
 
             const body = `
-            ## ${failed ? '🚨' : '✅'} Stage 3 · SCA (Dependency Scanning)
+            ## ${failed ? '[FAIL]' : '[PASS]'} Stage 3 · SCA (Dependency Scanning)
 
             ${failed ? '**CRITICAL/HIGH CVEs detected — merge BLOCKED**' : '**No CRITICAL/HIGH CVEs — merge allowed**'}
 
             | Tool | Status | CRIT/HIGH |
             |------|--------|-----------|
-            | ${gvEmoji} govulncheck (Go) | \`${gvOutcome}\` | ${process.env.GV_VULNS || 0} |
-            | ${dnEmoji} dotnet --vulnerable (C#) | \`${dnOutcome}\` | ${process.env.DN_CRIT || 0} |
-            | ${trEmoji} Trivy fs | \`${trOutcome}\` | ${process.env.TR_CRIT || 0} CRIT / ${process.env.TR_HIGH || 0} HIGH |
+            | govulncheck (${gvBadge}) | \`${gvOutcome}\` | ${process.env.GV_VULNS || 0} |
+            | dotnet --vulnerable (${dnBadge}) | \`${dnOutcome}\` | ${process.env.DN_CRIT || 0} |
+            | Trivy fs (${trBadge}) | \`${trOutcome}\` | ${process.env.TR_CRIT || 0} CRIT / ${process.env.TR_HIGH || 0} HIGH |
 
-            > 🔒 [Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
+            > [Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
 
-            <sub>🤖 Stage 3 SCA · \`${{ github.sha }}\`</sub>
+            <sub>Stage 3 SCA · \`${{ github.sha }}\`</sub>
             `;
 
             const { data: comments } = await github.rest.issues.listComments({
@@ -441,4 +441,4 @@ jobs:
             echo "::error::SCA gate FAILED. Check Security tab for CVE details."
             exit 1
           fi
-          echo "::notice::SCA gate PASSED ✅"
+          echo "::notice::SCA gate PASSED"

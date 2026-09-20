@@ -163,7 +163,7 @@ jobs:
               exit 1
             fi
 
-            echo "✅ ${service}: ${DIGEST} (verified)"
+            echo "${service}: ${DIGEST} (verified)"
             echo "${service^^}_DIGEST=${DIGEST}" >> "$GITHUB_ENV"
           done
 
@@ -338,7 +338,7 @@ jobs:
             echo "[${elapsed}s] Sync: ${sync_status} | Health: ${health_status}"
 
             if [ "$sync_status" = "Synced" ] && [ "$health_status" = "Healthy" ]; then
-              echo "✅ Application is Synced and Healthy"
+              echo "Application is Synced and Healthy"
               echo "outcome=PASS" >> "$GITHUB_OUTPUT"
               break
             fi
@@ -379,10 +379,10 @@ jobs:
         if: always()
         run: |
           outcome="${{ steps.health-check.outputs.outcome || 'UNKNOWN' }}"
-          emoji="✅"; [ "$outcome" != "PASS" ] && emoji="🚨"
+          status_badge="[PASS]"; [ "$outcome" != "PASS" ] && status_badge="[FAIL]"
 
           cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          # ${emoji} Stage 6 · GitOps Deploy Report
+          # ${status_badge} Stage 6 · GitOps Deploy Report
 
           > Commit: \`${{ github.sha }}\` | Deploy commit: \`${{ needs.update-manifests.outputs.commit-sha }}\`
 
@@ -393,7 +393,7 @@ jobs:
           | Registry | \`ghcr.io/pruthviraj-333\` |
           | Images updated | \`${{ needs.update-manifests.outputs.images-updated }}\` manifests |
           | Sync outcome | \`${outcome}\` |
-          | Signing | ✅ All images verified before deploy |
+          | Signing | All images verified before deploy |
 
           ## ArgoCD Application Status
           \`\`\`

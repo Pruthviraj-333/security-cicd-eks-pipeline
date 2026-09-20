@@ -229,13 +229,13 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const stageMap = {
-              'Stage 1 · Secrets Scanning':          { emoji: '🔐', tools: 'Gitleaks + TruffleHog' },
-              'Stage 2 · SAST':                      { emoji: '🔬', tools: 'gosec + Semgrep' },
-              'Stage 3 · SCA (Dependency Scanning)': { emoji: '📦', tools: 'govulncheck + Trivy + dotnet' },
-              'Stage 4 · IaC Security Scanning':     { emoji: '🏗️', tools: 'Checkov + kube-linter + tfsec' },
-              'Stage 5 · Image Build + Cosign Signing': { emoji: '🔏', tools: 'Docker Buildx + Cosign + Syft' },
-              'Stage 6 · GitOps Deploy (ArgoCD)':    { emoji: '🚀', tools: 'ArgoCD + IRSA' },
-              'Stage 7 · Drift Detection':           { emoji: '📡', tools: 'argocd diff + kubectl' },
+              'Stage 1 · Secrets Scanning':          { tools: 'Gitleaks + TruffleHog' },
+              'Stage 2 · SAST':                      { tools: 'gosec + Semgrep' },
+              'Stage 3 · SCA (Dependency Scanning)': { tools: 'govulncheck + Trivy + dotnet' },
+              'Stage 4 · IaC Security Scanning':     { tools: 'Checkov + kube-linter + tfsec' },
+              'Stage 5 · Image Build + Cosign Signing': { tools: 'Docker Buildx + Cosign + Syft' },
+              'Stage 6 · GitOps Deploy (ArgoCD)':    { tools: 'ArgoCD + IRSA' },
+              'Stage 7 · Drift Detection':           { tools: 'argocd diff + kubectl' },
             };
 
             const rows = [];
@@ -258,8 +258,8 @@ jobs:
                   rows.push(`| ${meta.emoji} ${name} | ${meta.tools} | \`no runs yet\` | — |`);
                   continue;
                 }
-                const statusEmoji = latest.conclusion === 'success' ? '✅' :
-                                    latest.conclusion === 'failure' ? '❌' : '⏳';
+                const statusBadge = latest.conclusion === 'success' ? '[PASS]' :
+                                    latest.conclusion === 'failure' ? '[FAIL]' : '[PENDING]';
                 const ago = latest.updated_at
                   ? `${Math.round((Date.now() - new Date(latest.updated_at)) / 60000)}m ago`
                   : '—';
@@ -277,12 +277,12 @@ jobs:
           PASS_RATE: ${{ needs.aggregate-and-publish.outputs.pass-rate }}
         run: |
           pass_rate="${PASS_RATE:-N/A}"
-          pass_emoji="🟢"
-          [ "${pass_rate}" != "N/A" ] && [ "${pass_rate}" -lt 80 ] && pass_emoji="🟡"
-          [ "${pass_rate}" != "N/A" ] && [ "${pass_rate}" -lt 60 ] && pass_emoji="🔴"
+          pass_badge="[PASS]"
+          [ "${pass_rate}" != "N/A" ] && [ "${pass_rate}" -lt 80 ] && pass_badge="[WARN]"
+          [ "${pass_rate}" != "N/A" ] && [ "${pass_rate}" -lt 60 ] && pass_badge="[FAIL]"
 
           cat >> "$GITHUB_STEP_SUMMARY" << 'SUMMARY_EOF'
-          # 🛡️ Security Pipeline Dashboard
+          # Security Pipeline Dashboard
 
           > **Repository**: `Pruthviraj-333/security-cicd-eks-pipeline` | **Branch**: `main`
           > **Generated**: TIMESTAMP_PLACEHOLDER | **Services**: `frontend` · `cartservice` · `checkoutservice`
@@ -294,7 +294,7 @@ jobs:
 
           cat >> "$GITHUB_STEP_SUMMARY" << SUMMARY_EOF
 
-          ## ${pass_emoji} Overall Pipeline Pass Rate: ${pass_rate}%
+          ## Overall Pipeline Pass Rate: ${pass_rate}% (${pass_badge})
 
           ## Stage Status
 
@@ -331,20 +331,20 @@ jobs:
 
           | Property | Implementation |
           |----------|----------------|
-          | 🔐 No stored AWS keys | GitHub Actions OIDC → IAM role assumption |
-          | 🔑 No signing keys | Cosign keyless (Sigstore Fulcio + Rekor) |
-          | 📋 SBOM on every image | Syft SPDX JSON attached as OCI attestation |
-          | 🏗️ Least-privilege deploy | Separate IRSA role per workload |
-          | 📡 Continuous reconciliation | ArgoCD self-heal + 30-min drift checks |
-          | 🔒 Encrypted at rest | KMS for EKS secrets + EBS + CloudWatch logs |
-          | 🛡️ Network isolation | Worker nodes in private subnets only |
-          | 📊 Full audit trail | Sigstore Rekor transparency log |
+          | No stored AWS keys | GitHub Actions OIDC → IAM role assumption |
+          | No signing keys | Cosign keyless (Sigstore Fulcio + Rekor) |
+          | SBOM on every image | Syft SPDX JSON attached as OCI attestation |
+          | Least-privilege deploy | Separate IRSA role per workload |
+          | Continuous reconciliation | ArgoCD self-heal + 30-min drift checks |
+          | Encrypted at rest | KMS for EKS secrets + EBS + CloudWatch logs |
+          | Network isolation | Worker nodes in private subnets only |
+          | Full audit trail | Sigstore Rekor transparency log |
 
           ---
-          > 📊 [View in Grafana](http://localhost:3000) (requires port-forward)
-          > 🔒 [Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
-          > 📁 [All workflow runs](https://github.com/${{ github.repository }}/actions)
+          > [View in Grafana](http://localhost:3000) (requires port-forward)
+          > [Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
+          > [All workflow runs](https://github.com/${{ github.repository }}/actions)
 
           SUMMARY_EOF
 
-          echo "Job Summary dashboard written ✅"
+          echo "Job Summary dashboard written"

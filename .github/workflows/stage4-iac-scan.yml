@@ -206,14 +206,14 @@ jobs:
       # ── Upload SARIFs ────────────────────────────────────────────────
       - name: Upload Terraform SARIF
         if: always() && hashFiles('checkov-terraform.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: checkov-terraform.sarif
           category: "checkov-terraform"
 
       - name: Upload K8s SARIF
         if: always() && hashFiles('checkov-k8s.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: checkov-k8s.sarif
           category: "checkov-kubernetes"
@@ -254,7 +254,7 @@ jobs:
             exit 1
           fi
           echo "outcome=PASS" >> "$GITHUB_OUTPUT"
-          echo "::notice::Checkov: no HIGH/CRITICAL IaC findings ✅"
+          echo "::notice::Checkov: no HIGH/CRITICAL IaC findings [PASS]"
 
   # ───────────────────────────────────────────────────────────────────────────
   # JOB 2 — kube-linter: Kubernetes manifest linting (best practices + security)
@@ -393,7 +393,7 @@ jobs:
       # ── Upload SARIF ─────────────────────────────────────────────────
       - name: Upload kube-linter SARIF
         if: always() && hashFiles('kube-linter-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: kube-linter-results.sarif
           category: "kube-linter"
@@ -442,7 +442,7 @@ jobs:
 
           [ "$count" -gt 0 ] && echo "::warning::kube-linter found ${count} advisory finding(s). Review recommended."
           echo "outcome=PASS" >> "$GITHUB_OUTPUT"
-          echo "::notice::kube-linter: no blocking findings ✅"
+          echo "::notice::kube-linter: no blocking findings [PASS]"
 
   # ───────────────────────────────────────────────────────────────────────────
   # JOB 3 — tfsec: AWS-specific Terraform security rules
@@ -484,12 +484,48 @@ jobs:
         if: steps.tf-check.outputs.tf_count != '0'
         run: |
           docker run --rm \
-            -v "$PWD/terraform:/src" \
+            -v "$PWD:/src" \
+            -w /src \
             aquasec/tfsec:latest \
             --format sarif \
             --minimum-severity HIGH \
+            --exclude-downloaded-modules \
             --soft-fail \
-            /src > tfsec-results.sarif 2>/dev/null || true
+            terraform/ > tfsec-results.sarif 2>/dev/null || true
+
+          # Sanitize tfsec SARIF to ensure URI scheme compatibility with GitHub code scanning
+          python3 -c "
+          import json, os
+          f = 'tfsec-results.sarif'
+          if os.path.exists(f) and os.path.getsize(f) > 0:
+              try:
+                  with open(f, 'r', encoding='utf-8') as fp:
+                      d = json.load(fp)
+                  for run in d.get('runs', []):
+                      clean_results = []
+                      for r in run.get('results', []):
+                          keep = True
+                          for loc in r.get('locations', []):
+                              pl = loc.get('physicalLocation', {})
+                              al = pl.get('artifactLocation', {})
+                              uri = al.get('uri', '')
+                              if uri.startswith(('git:', 'git::', 'git://', 'http://', 'https://')):
+                                  keep = False
+                                  break
+                              if uri.startswith('/src/'):
+                                  al['uri'] = uri[5:]
+                              elif uri.startswith('src/'):
+                                  al['uri'] = uri[4:]
+                              elif uri.startswith('/'):
+                                  al['uri'] = uri.lstrip('/')
+                          if keep:
+                              clean_results.append(r)
+                      run['results'] = clean_results
+                  with open(f, 'w', encoding='utf-8') as fp:
+                      json.dump(d, fp, indent=2)
+              except Exception as e:
+                  print('SARIF sanitize warning:', e)
+          "
         continue-on-error: true
 
       - name: Skip message (no TF files yet)
@@ -520,7 +556,8 @@ jobs:
 
       - name: Upload tfsec SARIF
         if: always() && hashFiles('tfsec-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
+        continue-on-error: true
         with:
           sarif_file: tfsec-results.sarif
           category: "tfsec"
@@ -554,7 +591,7 @@ jobs:
             exit 1
           fi
           echo "outcome=PASS" >> "$GITHUB_OUTPUT"
-          echo "::notice::tfsec: no HIGH/CRITICAL Terraform findings ✅"
+          echo "::notice::tfsec: no HIGH/CRITICAL Terraform findings [PASS]"
 
   # ───────────────────────────────────────────────────────────────────────────
   # JOB 4 — IaC Report Aggregator
@@ -582,20 +619,20 @@ jobs:
           kl="${KL_OUTCOME:-UNKNOWN}"
           tf="${TF_OUTCOME:-UNKNOWN}"
 
-          ck_emoji="✅"; [ "$ck" = "FAIL" ] && ck_emoji="🚨"
-          kl_emoji="✅"; [ "$kl" = "FAIL" ] && kl_emoji="🚨"
-          tf_emoji="✅"; [ "$tf" = "FAIL" ] && tf_emoji="🚨"
-          [ "$tf" = "SKIPPED" ] && tf_emoji="⏭️"
+          ck_badge="[PASS]"; [ "$ck" = "FAIL" ] && ck_badge="[FAIL]"
+          kl_badge="[PASS]"; [ "$kl" = "FAIL" ] && kl_badge="[FAIL]"
+          tf_badge="[PASS]"; [ "$tf" = "FAIL" ] && tf_badge="[FAIL]"
+          [ "$tf" = "SKIPPED" ] && tf_badge="[SKIPPED]"
 
           failed=false
           { [ "$ck" = "FAIL" ] || [ "$kl" = "FAIL" ] || [ "$tf" = "FAIL" ]; } && failed=true
 
-          overall_emoji="✅"
+          overall_badge="[PASS]"
           overall_text="**No HIGH/CRITICAL IaC findings — merge allowed**"
-          $failed && overall_emoji="🚨" && overall_text="**HIGH/CRITICAL IaC findings detected — merge BLOCKED**"
+          $failed && overall_badge="[FAIL]" && overall_text="**HIGH/CRITICAL IaC findings detected — merge BLOCKED**"
 
           cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          # ${overall_emoji} Stage 4 · IaC Security Scan Report
+          # ${overall_badge} Stage 4 · IaC Security Scan Report
 
           > Commit: \`${{ github.sha }}\` | Branch: \`${{ github.ref_name }}\`
           > Scanned: \`terraform/\` · \`kubernetes-manifests/\` · \`helm-chart/\`
@@ -604,13 +641,13 @@ jobs:
 
           | Tool | Scope | Status | HIGH | CRITICAL |
           |------|-------|--------|------|----------|
-          | ${ck_emoji} Checkov (TF) | Terraform | \`${ck}\` | ${CK_TF_HIGH:-0} | — |
-          | ${ck_emoji} Checkov (K8s) | K8s manifests | \`${ck}\` | ${CK_K8S_HIGH:-0} | — |
-          | ${kl_emoji} kube-linter | K8s manifests | \`${kl}\` | ${KL_ERRORS:-0} findings | — |
-          | ${tf_emoji} tfsec | Terraform (AWS) | \`${tf}\` | ${TF_HIGH:-0} | ${TF_CRIT:-0} |
+          | Checkov (TF) (${ck_badge}) | Terraform | \`${ck}\` | ${CK_TF_HIGH:-0} | — |
+          | Checkov (K8s) (${ck_badge}) | K8s manifests | \`${ck}\` | ${CK_K8S_HIGH:-0} | — |
+          | kube-linter (${kl_badge}) | K8s manifests | \`${kl}\` | ${KL_ERRORS:-0} findings | — |
+          | tfsec (${tf_badge}) | Terraform (AWS) | \`${tf}\` | ${TF_HIGH:-0} | ${TF_CRIT:-0} |
 
-          > 🔒 [View SARIF in Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
-          > 📁 [Download scan artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          > [View SARIF in Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
+          > [Download scan artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
           ### Key checks (Checkov K8s)
           | Check | Description | Severity |
@@ -644,25 +681,25 @@ jobs:
             const tf = process.env.TF_OUTCOME || 'UNKNOWN';
 
             const failed = ck === 'FAIL' || kl === 'FAIL' || tf === 'FAIL';
-            const ckEmoji = ck === 'FAIL'      ? '🚨' : '✅';
-            const klEmoji = kl === 'FAIL'      ? '🚨' : '✅';
-            const tfEmoji = tf === 'SKIPPED'   ? '⏭️' : tf === 'FAIL' ? '🚨' : '✅';
+            const ckBadge = ck === 'FAIL'      ? '[FAIL]' : '[PASS]';
+            const klBadge = kl === 'FAIL'      ? '[FAIL]' : '[PASS]';
+            const tfBadge = tf === 'SKIPPED'   ? '[SKIPPED]' : tf === 'FAIL' ? '[FAIL]' : '[PASS]';
 
             const body = `
-            ## ${failed ? '🚨' : '✅'} Stage 4 · IaC Security Scanning
+            ## ${failed ? '[FAIL]' : '[PASS]'} Stage 4 · IaC Security Scanning
 
             ${failed ? '**HIGH/CRITICAL IaC findings — merge BLOCKED**' : '**No HIGH/CRITICAL IaC findings — merge allowed**'}
 
             | Tool | Scope | Status | HIGH |
             |------|-------|--------|------|
-            | ${ckEmoji} Checkov (TF) | Terraform | \`${ck}\` | ${process.env.CK_TF_HIGH || 0} |
-            | ${ckEmoji} Checkov (K8s) | K8s manifests | \`${ck}\` | ${process.env.CK_K8S_HIGH || 0} |
-            | ${klEmoji} kube-linter | K8s manifests | \`${kl}\` | ${process.env.KL_ERRORS || 0} |
-            | ${tfEmoji} tfsec | Terraform (AWS) | \`${tf}\` | — |
+            | Checkov (TF) (${ckBadge}) | Terraform | \`${ck}\` | ${process.env.CK_TF_HIGH || 0} |
+            | Checkov (K8s) (${ckBadge}) | K8s manifests | \`${ck}\` | ${process.env.CK_K8S_HIGH || 0} |
+            | kube-linter (${klBadge}) | K8s manifests | \`${kl}\` | ${process.env.KL_ERRORS || 0} |
+            | tfsec (${tfBadge}) | Terraform (AWS) | \`${tf}\` | — |
 
-            > 🔒 [Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
+            > [Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
 
-            <sub>🤖 Stage 4 IaC Scan · \`${{ github.sha }}\`</sub>
+            <sub>Stage 4 IaC Scan · \`${{ github.sha }}\`</sub>
             `;
 
             const { data: comments } = await github.rest.issues.listComments({
@@ -686,4 +723,4 @@ jobs:
             echo "::error::IaC gate FAILED. Check Security tab for findings."
             exit 1
           fi
-          echo "::notice::IaC gate PASSED ✅"
+          echo "::notice::IaC gate PASSED"
