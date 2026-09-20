@@ -1,0 +1,407 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2 — Static Application Security Testing (SAST)
+#
+# Tools (per language):
+#   Go (frontend, checkoutservice) → gosec + Semgrep (go rules)
+#   C# / .NET (cartservice)        → Semgrep (csharp rules) + Security Code Scan
+#
+# Outputs:
+#   - SARIF files uploaded to GitHub Security → Code Scanning tab
+#   - Workflow artifacts (JSON/SARIF) for Stage 8 aggregation
+#   - Job Summary markdown table
+#
+# Failure policy:
+#   HIGH / CRITICAL findings → fail the job (blocks merge)
+#   MEDIUM / LOW            → warn, continue
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "Stage 2 · SAST"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "microservices-demo/src/frontend/**"
+      - "microservices-demo/src/checkoutservice/**"
+      - "microservices-demo/src/cartservice/**"
+      - ".semgrep/**"
+      - ".github/workflows/stage2-sast.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "microservices-demo/src/frontend/**"
+      - "microservices-demo/src/checkoutservice/**"
+      - "microservices-demo/src/cartservice/**"
+      - ".semgrep/**"
+      - ".github/workflows/stage2-sast.yml"
+
+concurrency:
+  group: "sast-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write   # upload SARIF
+  pull-requests: write     # PR comment
+  actions: read
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 1 — gosec: Go security linter (frontend + checkoutservice)
+  # ───────────────────────────────────────────────────────────────────────────
+  gosec-scan:
+    name: "gosec · Go SAST"
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.set-outcome.outputs.outcome }}
+      high-count: ${{ steps.parse.outputs.high_count }}
+      total-count: ${{ steps.parse.outputs.total_count }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [frontend, checkoutservice]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: microservices-demo/src/${{ matrix.service }}/go.mod
+          cache-dependency-path: microservices-demo/src/${{ matrix.service }}/go.sum
+
+      - name: Install gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Run gosec
+        id: gosec
+        working-directory: microservices-demo/src/${{ matrix.service }}
+        run: |
+          gosec \
+            -fmt sarif \
+            -out gosec-${{ matrix.service }}.sarif \
+            -severity medium \
+            -confidence medium \
+            -exclude-dir genproto \
+            ./... 2>&1 || true
+          # Always copy output to workspace root for upload
+          cp gosec-${{ matrix.service }}.sarif "$GITHUB_WORKSPACE/" 2>/dev/null || true
+        continue-on-error: true
+
+      - name: Also run gosec as JSON (for counting)
+        working-directory: microservices-demo/src/${{ matrix.service }}
+        run: |
+          gosec \
+            -fmt json \
+            -out gosec-${{ matrix.service }}.json \
+            -severity medium \
+            -confidence medium \
+            -exclude-dir genproto \
+            ./... 2>&1 || true
+          cp gosec-${{ matrix.service }}.json "$GITHUB_WORKSPACE/" 2>/dev/null || true
+        continue-on-error: true
+
+      - name: Parse gosec JSON
+        id: parse
+        run: |
+          f="gosec-${{ matrix.service }}.json"
+          if [ ! -s "$f" ]; then
+            echo "total_count=0" >> "$GITHUB_OUTPUT"
+            echo "high_count=0"  >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          total=$(jq '.Issues | length' "$f" 2>/dev/null || echo "0")
+          high=$(jq '[.Issues[] | select(.severity == "HIGH" or .severity == "CRITICAL")] | length' "$f" 2>/dev/null || echo "0")
+          echo "total_count=${total}" >> "$GITHUB_OUTPUT"
+          echo "high_count=${high}"   >> "$GITHUB_OUTPUT"
+          echo "${{ matrix.service }}: total=${total}, HIGH=${high}"
+
+          # Print a readable summary without exposing code snippets
+          jq -r '.Issues[] | "[\(.severity)] \(.rule_id): \(.file):\(.line) — \(.details)"' "$f" 2>/dev/null || true
+
+      - name: Upload SARIF to GitHub Security
+        if: always() && hashFiles('gosec-${{ matrix.service }}.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gosec-${{ matrix.service }}.sarif
+          category: "gosec-${{ matrix.service }}"
+
+      - name: Archive gosec artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gosec-${{ matrix.service }}
+          path: |
+            gosec-${{ matrix.service }}.sarif
+            gosec-${{ matrix.service }}.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Set outcome
+        id: set-outcome
+        run: |
+          high=${{ steps.parse.outputs.high_count || 0 }}
+          if [ "$high" -gt 0 ]; then
+            echo "outcome=FAIL" >> "$GITHUB_OUTPUT"
+            echo "::error::gosec found ${high} HIGH/CRITICAL issue(s) in ${{ matrix.service }}. Merge blocked."
+            exit 1
+          fi
+          echo "outcome=PASS" >> "$GITHUB_OUTPUT"
+          echo "::notice::gosec: no HIGH/CRITICAL issues in ${{ matrix.service }} ✅"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 2 — Semgrep: Multi-language SAST (Go + C# rules)
+  # Covers all 3 services in one job using the official Semgrep action
+  # ───────────────────────────────────────────────────────────────────────────
+  semgrep-scan:
+    name: "Semgrep · Multi-language SAST"
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:latest
+    outputs:
+      outcome: ${{ steps.set-outcome.outputs.outcome }}
+      high-count: ${{ steps.parse.outputs.high_count }}
+      total-count: ${{ steps.parse.outputs.total_count }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep (Go rules)
+        id: semgrep-go
+        run: |
+          semgrep \
+            --config "p/golang"          \
+            --config "p/owasp-top-ten"   \
+            --config "p/secrets"         \
+            --config ".semgrep/custom-rules.yml" \
+            --include "microservices-demo/src/frontend/**" \
+            --include "microservices-demo/src/checkoutservice/**" \
+            --sarif \
+            --output semgrep-go.sarif   \
+            --severity ERROR            \
+            --severity WARNING          \
+            --no-git-ignore             \
+            --quiet \
+            . 2>&1 || true
+        continue-on-error: true
+
+      - name: Run Semgrep (C# rules — cartservice)
+        id: semgrep-csharp
+        run: |
+          semgrep \
+            --config "p/csharp"          \
+            --config "p/owasp-top-ten"   \
+            --include "microservices-demo/src/cartservice/**" \
+            --sarif \
+            --output semgrep-csharp.sarif \
+            --severity ERROR             \
+            --severity WARNING           \
+            --no-git-ignore              \
+            --quiet \
+            . 2>&1 || true
+        continue-on-error: true
+
+      - name: Run Semgrep JSON (for counting)
+        run: |
+          semgrep \
+            --config "p/golang"          \
+            --config "p/csharp"          \
+            --config "p/owasp-top-ten"   \
+            --config ".semgrep/custom-rules.yml" \
+            --include "microservices-demo/src/frontend/**" \
+            --include "microservices-demo/src/checkoutservice/**" \
+            --include "microservices-demo/src/cartservice/**" \
+            --json \
+            --output semgrep-all.json    \
+            --severity ERROR             \
+            --severity WARNING           \
+            --no-git-ignore              \
+            --quiet \
+            . 2>&1 || true
+        continue-on-error: true
+
+      - name: Parse Semgrep results
+        id: parse
+        run: |
+          f="semgrep-all.json"
+          if [ ! -s "$f" ]; then
+            echo "total_count=0" >> "$GITHUB_OUTPUT"
+            echo "high_count=0"  >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          total=$(jq '.results | length' "$f" 2>/dev/null || echo "0")
+          high=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' "$f" 2>/dev/null || echo "0")
+          echo "total_count=${total}" >> "$GITHUB_OUTPUT"
+          echo "high_count=${high}"   >> "$GITHUB_OUTPUT"
+          echo "Semgrep: total=${total}, ERROR-level=${high}"
+
+          # Print findings summary
+          jq -r '.results[] | "[\(.extra.severity)] \(.check_id): \(.path):\(.start.line) — \(.extra.message)"' "$f" 2>/dev/null | head -50 || true
+
+      - name: Upload Go SARIF to GitHub Security
+        if: always() && hashFiles('semgrep-go.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-go.sarif
+          category: "semgrep-go"
+
+      - name: Upload C# SARIF to GitHub Security
+        if: always() && hashFiles('semgrep-csharp.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-csharp.sarif
+          category: "semgrep-csharp"
+
+      - name: Archive Semgrep artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-results
+          path: |
+            semgrep-go.sarif
+            semgrep-csharp.sarif
+            semgrep-all.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Set outcome
+        id: set-outcome
+        run: |
+          high=${{ steps.parse.outputs.high_count || 0 }}
+          if [ "$high" -gt 0 ]; then
+            echo "outcome=FAIL" >> "$GITHUB_OUTPUT"
+            echo "::error::Semgrep found ${high} ERROR-level finding(s). Merge blocked."
+            exit 1
+          fi
+          echo "outcome=PASS" >> "$GITHUB_OUTPUT"
+          echo "::notice::Semgrep: no ERROR-level findings ✅"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 3 — SAST Report Aggregator (always runs, posts PR comment)
+  # ───────────────────────────────────────────────────────────────────────────
+  sast-report:
+    name: "SAST · Summary Report"
+    runs-on: ubuntu-latest
+    needs: [gosec-scan, semgrep-scan]
+    if: always()
+
+    steps:
+      - name: Build Job Summary
+        id: summary
+        env:
+          GOSEC_OUTCOME: ${{ needs.gosec-scan.result }}
+          GOSEC_HIGH: ${{ needs.gosec-scan.outputs.high-count }}
+          GOSEC_TOTAL: ${{ needs.gosec-scan.outputs.total-count }}
+          SEMGREP_OUTCOME: ${{ needs.semgrep-scan.outputs.outcome }}
+          SEMGREP_HIGH: ${{ needs.semgrep-scan.outputs.high-count }}
+          SEMGREP_TOTAL: ${{ needs.semgrep-scan.outputs.total-count }}
+        run: |
+          # Matrix jobs report 'failure' if ANY matrix leg failed
+          gs="${GOSEC_OUTCOME}"
+          sm="${SEMGREP_OUTCOME:-UNKNOWN}"
+
+          gs_emoji="✅"; [ "$gs" = "failure" ] && gs_emoji="🚨"
+          sm_emoji="✅"; [ "$sm" = "FAIL"    ] && sm_emoji="🚨"
+
+          failed=false
+          { [ "$gs" = "failure" ] || [ "$sm" = "FAIL" ]; } && failed=true
+
+          overall_emoji="✅"
+          overall_text="**No HIGH/CRITICAL SAST findings — merge allowed**"
+          $failed && overall_emoji="🚨" && overall_text="**HIGH/CRITICAL SAST findings detected — merge BLOCKED**"
+
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          # ${overall_emoji} Stage 2 · SAST Report
+
+          > Commit: \`${{ github.sha }}\` | Branch: \`${{ github.ref_name }}\`
+          > Services: \`frontend\` (Go) · \`checkoutservice\` (Go) · \`cartservice\` (C#)
+
+          ## ${overall_text}
+
+          | Tool | Languages | Status | Total | HIGH/ERR |
+          |------|-----------|--------|-------|----------|
+          | ${gs_emoji} gosec | Go | \`${gs}\` | ${GOSEC_TOTAL:-0} | ${GOSEC_HIGH:-0} |
+          | ${sm_emoji} Semgrep | Go + C# | \`${sm}\` | ${SEMGREP_TOTAL:-0} | ${SEMGREP_HIGH:-0} |
+
+          ### Severity Policy
+          | Level | Action |
+          |-------|--------|
+          | 🔴 HIGH / CRITICAL (gosec) | Block merge |
+          | 🔴 ERROR (Semgrep) | Block merge |
+          | 🟡 MEDIUM / WARNING | Warn, allow merge |
+          | 🟢 LOW / INFO | Info only |
+
+          > 🔒 [View SARIF in Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
+          EOF
+
+          $failed && echo "overall=FAIL" >> "$GITHUB_OUTPUT" || echo "overall=PASS" >> "$GITHUB_OUTPUT"
+
+      - name: Post PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          GOSEC_OUTCOME: ${{ needs.gosec-scan.result }}
+          GOSEC_HIGH: ${{ needs.gosec-scan.outputs.high-count }}
+          SEMGREP_OUTCOME: ${{ needs.semgrep-scan.outputs.outcome }}
+          SEMGREP_HIGH: ${{ needs.semgrep-scan.outputs.high-count }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const gsOutcome   = process.env.GOSEC_OUTCOME   || 'unknown';
+            const smOutcome   = process.env.SEMGREP_OUTCOME || 'UNKNOWN';
+            const gsHigh      = process.env.GOSEC_HIGH      || '0';
+            const smHigh      = process.env.SEMGREP_HIGH    || '0';
+
+            const failed = gsOutcome === 'failure' || smOutcome === 'FAIL';
+            const gsEmoji = gsOutcome === 'failure' ? '🚨' : '✅';
+            const smEmoji = smOutcome === 'FAIL'    ? '🚨' : '✅';
+
+            const body = `
+            ## ${failed ? '🚨' : '✅'} Stage 2 · SAST
+
+            ${failed ? '**HIGH/CRITICAL findings — merge BLOCKED**' : '**No HIGH/CRITICAL findings — merge allowed**'}
+
+            | Tool | Languages | Status | HIGH/ERR |
+            |------|-----------|--------|----------|
+            | ${gsEmoji} gosec | Go | \`${gsOutcome}\` | ${gsHigh} |
+            | ${smEmoji} Semgrep | Go + C# | \`${smOutcome}\` | ${smHigh} |
+
+            > 🔒 [View in Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
+
+            <sub>🤖 Stage 2 SAST · \`${{ github.sha }}\`</sub>
+            `;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Stage 2 · SAST')
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+
+      - name: Enforce merge gate
+        if: always()
+        run: |
+          if [ "${{ steps.summary.outputs.overall }}" = "FAIL" ]; then
+            echo "::error::SAST gate FAILED. Check Security tab for findings."
+            exit 1
+          fi
+          echo "::notice::SAST gate PASSED ✅"

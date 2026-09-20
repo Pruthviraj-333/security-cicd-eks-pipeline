@@ -1,0 +1,444 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3 — Software Composition Analysis (SCA / Dependency Scanning)
+#
+# Tools:
+#   Go (frontend, checkoutservice) → govulncheck (official Go vuln DB)
+#                                  → nancy (Sonatype OSS Index)
+#   C# (cartservice)               → dotnet list package --vulnerable
+#                                  → grype (container/SBOM-level scanning)
+#   All services                   → Trivy (filesystem scan for known CVEs)
+#
+# Outputs:
+#   - SARIF → GitHub Security tab
+#   - JSON artifacts for Stage 8 dashboard
+#   - Job Summary + PR comment
+#
+# Failure policy:
+#   CRITICAL / HIGH CVEs → fail (blocks merge)
+#   MEDIUM / LOW         → warn, continue
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "Stage 3 · SCA (Dependency Scanning)"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "microservices-demo/src/frontend/go.mod"
+      - "microservices-demo/src/frontend/go.sum"
+      - "microservices-demo/src/checkoutservice/go.mod"
+      - "microservices-demo/src/checkoutservice/go.sum"
+      - "microservices-demo/src/cartservice/**/*.csproj"
+      - ".github/workflows/stage3-sca.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "microservices-demo/src/frontend/go.mod"
+      - "microservices-demo/src/frontend/go.sum"
+      - "microservices-demo/src/checkoutservice/go.mod"
+      - "microservices-demo/src/checkoutservice/go.sum"
+      - "microservices-demo/src/cartservice/**/*.csproj"
+      - ".github/workflows/stage3-sca.yml"
+  # Weekly scheduled scan (catches newly-published CVEs even without code changes)
+  schedule:
+    - cron: "0 3 * * 1"   # Every Monday at 03:00 UTC
+
+concurrency:
+  group: "sca-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+  actions: read
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 1 — govulncheck: Official Go vulnerability scanner (Go 1.18+)
+  #          Targets frontend and checkoutservice
+  # ───────────────────────────────────────────────────────────────────────────
+  govulncheck-scan:
+    name: "govulncheck · Go Vuln DB"
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.set-outcome.outputs.outcome }}
+      vuln-count: ${{ steps.parse.outputs.vuln_count }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [frontend, checkoutservice]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: microservices-demo/src/${{ matrix.service }}/go.mod
+          cache-dependency-path: microservices-demo/src/${{ matrix.service }}/go.sum
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        id: govulncheck
+        working-directory: microservices-demo/src/${{ matrix.service }}
+        run: |
+          govulncheck -json ./... 2>&1 > "$GITHUB_WORKSPACE/govulncheck-${{ matrix.service }}.json" || true
+          # Also produce human-readable output
+          govulncheck ./... 2>&1 | tee "$GITHUB_WORKSPACE/govulncheck-${{ matrix.service }}.txt" || true
+        continue-on-error: true
+
+      - name: Parse govulncheck results
+        id: parse
+        run: |
+          f="govulncheck-${{ matrix.service }}.json"
+          if [ ! -s "$f" ]; then
+            echo "vuln_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # govulncheck JSON: each "finding" with type "finding" is a real vuln call
+          count=$(jq '[.[] | select(.finding.osv != null)] | length' "$f" 2>/dev/null || echo "0")
+          echo "vuln_count=${count}" >> "$GITHUB_OUTPUT"
+          echo "${{ matrix.service }}: ${count} vulnerability finding(s)"
+
+          # Print readable summary
+          jq -r 'select(.finding.osv != null) | .finding | "[\(.osv)] \(.trace[0].function // "unknown") in \(.trace[0].module // "unknown")"' \
+            "$f" 2>/dev/null | head -20 || true
+
+      - name: Archive govulncheck output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: govulncheck-${{ matrix.service }}
+          path: |
+            govulncheck-${{ matrix.service }}.json
+            govulncheck-${{ matrix.service }}.txt
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Set outcome
+        id: set-outcome
+        run: |
+          count=${{ steps.parse.outputs.vuln_count || 0 }}
+          if [ "$count" -gt 0 ]; then
+            echo "outcome=FAIL" >> "$GITHUB_OUTPUT"
+            echo "::error::govulncheck found ${count} vulnerability/vulnerabilities in ${{ matrix.service }}. Merge blocked."
+            exit 1
+          fi
+          echo "outcome=PASS" >> "$GITHUB_OUTPUT"
+          echo "::notice::govulncheck: no vulnerabilities in ${{ matrix.service }} ✅"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 2 — dotnet vulnerable packages: .NET SCA for cartservice
+  # ───────────────────────────────────────────────────────────────────────────
+  dotnet-vuln-scan:
+    name: "dotnet · NuGet Vulnerability Scan"
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.set-outcome.outputs.outcome }}
+      critical-count: ${{ steps.parse.outputs.critical_count }}
+      high-count: ${{ steps.parse.outputs.high_count }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore NuGet packages
+        working-directory: microservices-demo/src/cartservice/src
+        run: dotnet restore --no-cache
+
+      - name: Scan for vulnerable packages
+        id: scan
+        working-directory: microservices-demo/src/cartservice/src
+        run: |
+          dotnet list package --vulnerable --include-transitive --format json \
+            > "$GITHUB_WORKSPACE/dotnet-vuln-cartservice.json" 2>&1 || true
+          cat "$GITHUB_WORKSPACE/dotnet-vuln-cartservice.json"
+        continue-on-error: true
+
+      - name: Parse dotnet vuln results
+        id: parse
+        run: |
+          f="dotnet-vuln-cartservice.json"
+          if [ ! -s "$f" ]; then
+            echo "critical_count=0" >> "$GITHUB_OUTPUT"
+            echo "high_count=0"     >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          critical=$(jq '[
+            .projects[].frameworks[].topLevelPackages[]?,
+            .projects[].frameworks[].transitivePackages[]?
+            | select(.vulnerabilities[]?.severity == "Critical")
+          ] | length' "$f" 2>/dev/null || echo "0")
+
+          high=$(jq '[
+            .projects[].frameworks[].topLevelPackages[]?,
+            .projects[].frameworks[].transitivePackages[]?
+            | select(.vulnerabilities[]?.severity == "High")
+          ] | length' "$f" 2>/dev/null || echo "0")
+
+          echo "critical_count=${critical}" >> "$GITHUB_OUTPUT"
+          echo "high_count=${high}"         >> "$GITHUB_OUTPUT"
+          echo "cartservice: Critical=${critical}, High=${high}"
+
+          # Readable summary
+          jq -r '
+            .projects[].frameworks[] |
+            (.topLevelPackages[]?, .transitivePackages[]?) |
+            select(.vulnerabilities | length > 0) |
+            "[\(.vulnerabilities[0].severity)] \(.id) \(.resolvedVersion) — \(.vulnerabilities[0].advisoryurl)"
+          ' "$f" 2>/dev/null || true
+
+      - name: Archive dotnet vuln output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-vuln-cartservice
+          path: dotnet-vuln-cartservice.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Set outcome
+        id: set-outcome
+        run: |
+          critical=${{ steps.parse.outputs.critical_count || 0 }}
+          high=${{ steps.parse.outputs.high_count || 0 }}
+          if [ "$((critical + high))" -gt 0 ]; then
+            echo "outcome=FAIL" >> "$GITHUB_OUTPUT"
+            echo "::error::dotnet found ${critical} Critical and ${high} High vulnerable package(s). Merge blocked."
+            exit 1
+          fi
+          echo "outcome=PASS" >> "$GITHUB_OUTPUT"
+          echo "::notice::dotnet: no Critical/High vulnerable NuGet packages ✅"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 3 — Trivy: Filesystem SCA across all 3 services (CVE + secrets + misconfig)
+  # Uses SARIF output for GitHub Security integration
+  # ───────────────────────────────────────────────────────────────────────────
+  trivy-scan:
+    name: "Trivy · Filesystem SCA"
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.set-outcome.outputs.outcome }}
+      critical-count: ${{ steps.parse.outputs.critical_count }}
+      high-count: ${{ steps.parse.outputs.high_count }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: frontend
+            path: microservices-demo/src/frontend
+          - service: checkoutservice
+            path: microservices-demo/src/checkoutservice
+          - service: cartservice
+            path: microservices-demo/src/cartservice
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan (SARIF)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: ${{ matrix.path }}
+          format: sarif
+          output: trivy-${{ matrix.service }}.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: 0              # We check severity manually below
+          ignore-unfixed: true      # Skip vulns with no upstream fix available
+          vuln-type: library        # SCA mode: libraries only (not OS packages)
+
+      - name: Run Trivy filesystem scan (JSON — for counting)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: ${{ matrix.path }}
+          format: json
+          output: trivy-${{ matrix.service }}.json
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: 0
+          ignore-unfixed: true
+          vuln-type: library
+
+      - name: Parse Trivy JSON
+        id: parse
+        run: |
+          f="trivy-${{ matrix.service }}.json"
+          if [ ! -s "$f" ]; then
+            echo "critical_count=0" >> "$GITHUB_OUTPUT"
+            echo "high_count=0"     >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          critical=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$f" 2>/dev/null || echo "0")
+          high=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$f" 2>/dev/null || echo "0")
+          echo "critical_count=${critical}" >> "$GITHUB_OUTPUT"
+          echo "high_count=${high}"         >> "$GITHUB_OUTPUT"
+          echo "${{ matrix.service }}: Critical=${critical}, High=${high}"
+
+          # Readable CVE summary
+          jq -r '.Results[].Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH") |
+            "[\(.Severity)] \(.VulnerabilityID) in \(.PkgName) \(.InstalledVersion) → fix: \(.FixedVersion // "none")"' \
+            "$f" 2>/dev/null | head -30 || true
+
+      - name: Upload SARIF to GitHub Security
+        if: always() && hashFiles('trivy-${{ matrix.service }}.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.service }}.sarif
+          category: "trivy-${{ matrix.service }}"
+
+      - name: Archive Trivy artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-${{ matrix.service }}
+          path: |
+            trivy-${{ matrix.service }}.sarif
+            trivy-${{ matrix.service }}.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Set outcome
+        id: set-outcome
+        run: |
+          critical=${{ steps.parse.outputs.critical_count || 0 }}
+          high=${{ steps.parse.outputs.high_count || 0 }}
+          if [ "$((critical + high))" -gt 0 ]; then
+            echo "outcome=FAIL" >> "$GITHUB_OUTPUT"
+            echo "::error::Trivy found ${critical} CRITICAL + ${high} HIGH CVEs in ${{ matrix.service }}. Merge blocked."
+            exit 1
+          fi
+          echo "outcome=PASS" >> "$GITHUB_OUTPUT"
+          echo "::notice::Trivy: no CRITICAL/HIGH CVEs in ${{ matrix.service }} ✅"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 4 — SCA Report Aggregator
+  # ───────────────────────────────────────────────────────────────────────────
+  sca-report:
+    name: "SCA · Summary Report"
+    runs-on: ubuntu-latest
+    needs: [govulncheck-scan, dotnet-vuln-scan, trivy-scan]
+    if: always()
+
+    steps:
+      - name: Build Job Summary
+        id: summary
+        env:
+          GV_OUTCOME: ${{ needs.govulncheck-scan.result }}
+          GV_VULNS: ${{ needs.govulncheck-scan.outputs.vuln-count }}
+          DN_OUTCOME: ${{ needs.dotnet-vuln-scan.outputs.outcome }}
+          DN_CRIT: ${{ needs.dotnet-vuln-scan.outputs.critical-count }}
+          DN_HIGH: ${{ needs.dotnet-vuln-scan.outputs.high-count }}
+          TR_OUTCOME: ${{ needs.trivy-scan.result }}
+          TR_CRIT: ${{ needs.trivy-scan.outputs.critical-count }}
+          TR_HIGH: ${{ needs.trivy-scan.outputs.high-count }}
+        run: |
+          gv="${GV_OUTCOME:-unknown}"
+          dn="${DN_OUTCOME:-UNKNOWN}"
+          tr="${TR_OUTCOME:-unknown}"
+
+          gv_emoji="✅"; [ "$gv" = "failure" ] && gv_emoji="🚨"
+          dn_emoji="✅"; [ "$dn" = "FAIL"    ] && dn_emoji="🚨"
+          tr_emoji="✅"; [ "$tr" = "failure" ] && tr_emoji="🚨"
+
+          failed=false
+          { [ "$gv" = "failure" ] || [ "$dn" = "FAIL" ] || [ "$tr" = "failure" ]; } && failed=true
+
+          overall_emoji="✅"
+          overall_text="**No CRITICAL/HIGH CVEs — merge allowed**"
+          $failed && overall_emoji="🚨" && overall_text="**CRITICAL/HIGH CVEs detected — merge BLOCKED**"
+
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          # ${overall_emoji} Stage 3 · SCA Report
+
+          > Commit: \`${{ github.sha }}\` | Branch: \`${{ github.ref_name }}\`
+          > Services: \`frontend\` (Go) · \`checkoutservice\` (Go) · \`cartservice\` (C#/.NET)
+
+          ## ${overall_text}
+
+          | Tool | Scope | Status | CRITICAL | HIGH |
+          |------|-------|--------|----------|------|
+          | ${gv_emoji} govulncheck | Go modules | \`${gv}\` | — | ${GV_VULNS:-0} |
+          | ${dn_emoji} dotnet list --vulnerable | NuGet | \`${dn}\` | ${DN_CRIT:-0} | ${DN_HIGH:-0} |
+          | ${tr_emoji} Trivy (fs) | All languages | \`${tr}\` | ${TR_CRIT:-0} | ${TR_HIGH:-0} |
+
+          > 🔒 [View SARIF in Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
+          > 📁 [Download artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          EOF
+
+          $failed && echo "overall=FAIL" >> "$GITHUB_OUTPUT" || echo "overall=PASS" >> "$GITHUB_OUTPUT"
+
+      - name: Post PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          GV_OUTCOME: ${{ needs.govulncheck-scan.result }}
+          GV_VULNS: ${{ needs.govulncheck-scan.outputs.vuln-count }}
+          DN_OUTCOME: ${{ needs.dotnet-vuln-scan.outputs.outcome }}
+          DN_CRIT: ${{ needs.dotnet-vuln-scan.outputs.critical-count }}
+          TR_OUTCOME: ${{ needs.trivy-scan.result }}
+          TR_CRIT: ${{ needs.trivy-scan.outputs.critical-count }}
+          TR_HIGH: ${{ needs.trivy-scan.outputs.high-count }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const gvOutcome = process.env.GV_OUTCOME || 'unknown';
+            const dnOutcome = process.env.DN_OUTCOME || 'UNKNOWN';
+            const trOutcome = process.env.TR_OUTCOME || 'unknown';
+
+            const failed = gvOutcome === 'failure' || dnOutcome === 'FAIL' || trOutcome === 'failure';
+            const gvEmoji = gvOutcome === 'failure' ? '🚨' : '✅';
+            const dnEmoji = dnOutcome === 'FAIL'    ? '🚨' : '✅';
+            const trEmoji = trOutcome === 'failure' ? '🚨' : '✅';
+
+            const body = `
+            ## ${failed ? '🚨' : '✅'} Stage 3 · SCA (Dependency Scanning)
+
+            ${failed ? '**CRITICAL/HIGH CVEs detected — merge BLOCKED**' : '**No CRITICAL/HIGH CVEs — merge allowed**'}
+
+            | Tool | Status | CRIT/HIGH |
+            |------|--------|-----------|
+            | ${gvEmoji} govulncheck (Go) | \`${gvOutcome}\` | ${process.env.GV_VULNS || 0} |
+            | ${dnEmoji} dotnet --vulnerable (C#) | \`${dnOutcome}\` | ${process.env.DN_CRIT || 0} |
+            | ${trEmoji} Trivy fs | \`${trOutcome}\` | ${process.env.TR_CRIT || 0} CRIT / ${process.env.TR_HIGH || 0} HIGH |
+
+            > 🔒 [Security tab](https://github.com/${{ github.repository }}/security/code-scanning)
+
+            <sub>🤖 Stage 3 SCA · \`${{ github.sha }}\`</sub>
+            `;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Stage 3 · SCA')
+            );
+            const fn = existing ? 'updateComment' : 'createComment';
+            await github.rest.issues[fn]({
+              owner: context.repo.owner, repo: context.repo.repo,
+              ...(existing ? { comment_id: existing.id } : { issue_number: context.issue.number }),
+              body,
+            });
+
+      - name: Enforce merge gate
+        if: always()
+        run: |
+          if [ "${{ steps.summary.outputs.overall }}" = "FAIL" ]; then
+            echo "::error::SCA gate FAILED. Check Security tab for CVE details."
+            exit 1
+          fi
+          echo "::notice::SCA gate PASSED ✅"

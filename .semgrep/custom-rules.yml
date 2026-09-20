@@ -1,0 +1,178 @@
+# .semgrep/custom-rules.yml
+# Custom Semgrep rules tailored to the microservices-demo services:
+#   - frontend (Go / gRPC / HTTP)
+#   - checkoutservice (Go / gRPC)
+#   - cartservice (C# / ASP.NET Core / gRPC)
+#
+# These rules EXTEND (not replace) the official Semgrep rulesets loaded in the
+# stage2-sast.yml workflow (p/golang, p/csharp, p/owasp-top-ten).
+
+rules:
+
+  # ─── Go: gRPC / HTTP handler patterns ────────────────────────────────────
+
+  - id: go-missing-grpc-auth-check
+    patterns:
+      - pattern: |
+          func ($CTX context.Context, $REQ $TYPE) ($RES, error) {
+            ...
+          }
+      - pattern-not: |
+          func ($CTX context.Context, $REQ $TYPE) ($RES, error) {
+            ...
+            metadata.FromIncomingContext(...)
+            ...
+          }
+      - pattern-not: |
+          func ($CTX context.Context, $REQ $TYPE) ($RES, error) {
+            ...
+            auth.Check(...)
+            ...
+          }
+    message: |
+      gRPC handler '$CTX' does not appear to extract or validate incoming metadata.
+      Ensure auth tokens/headers are validated before processing requests.
+    languages: [go]
+    severity: WARNING
+    metadata:
+      category: security
+      confidence: LOW
+      owasp: "A01:2021 - Broken Access Control"
+
+  - id: go-http-hardcoded-port
+    pattern: |
+      http.ListenAndServe(":$PORT", ...)
+    message: |
+      Hardcoded port ':$PORT' in http.ListenAndServe. Consider reading from
+      an environment variable (os.Getenv("PORT")) for container deployments.
+    languages: [go]
+    severity: INFO
+    metadata:
+      category: best-practice
+
+  - id: go-tls-insecure-skip-verify
+    pattern: |
+      tls.Config{..., InsecureSkipVerify: true, ...}
+    message: |
+      InsecureSkipVerify is set to true in TLS config. This disables certificate
+      verification and is vulnerable to MITM attacks. Never use in production.
+    languages: [go]
+    severity: ERROR
+    metadata:
+      category: security
+      owasp: "A02:2021 - Cryptographic Failures"
+
+  - id: go-grpc-no-tls
+    pattern: grpc.WithInsecure()
+    message: |
+      grpc.WithInsecure() disables TLS on gRPC connections. Use grpc.WithTransportCredentials()
+      with a valid TLS config in production environments.
+    languages: [go]
+    severity: WARNING
+    metadata:
+      category: security
+      owasp: "A02:2021 - Cryptographic Failures"
+
+  - id: go-log-sensitive-field
+    patterns:
+      - pattern: |
+          $LOG.$FUNC(..., $KEY, $VAL, ...)
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: '(?i)(password|secret|token|key|credential|auth|api.?key)'
+    message: |
+      Possible logging of sensitive field '$KEY'. Ensure '$VAL' is not a plaintext
+      secret before logging. Consider redacting or omitting this field.
+    languages: [go]
+    severity: WARNING
+    metadata:
+      category: security
+      owasp: "A09:2021 - Security Logging and Monitoring Failures"
+
+  - id: go-os-getenv-no-default
+    pattern: os.Getenv("$KEY")
+    message: |
+      os.Getenv("$KEY") returns an empty string if the variable is unset.
+      Consider using a default value or fail-fast check at startup to avoid
+      silent misconfigurations.
+    languages: [go]
+    severity: INFO
+    metadata:
+      category: best-practice
+
+  # ─── C# / ASP.NET Core (cartservice) ─────────────────────────────────────
+
+  - id: csharp-connection-string-hardcoded
+    patterns:
+      - pattern: |
+          $VAR = "...$KEYWORD...";
+      - metavariable-regex:
+          metavariable: $KEYWORD
+          regex: '(?i)(password=|pwd=|User ID=|Data Source=|Server=.*Database=)'
+    message: |
+      Possible hardcoded connection string containing '$KEYWORD'. Store connection
+      strings in environment variables or a secret manager (e.g. AWS Secrets Manager).
+    languages: [csharp]
+    severity: ERROR
+    metadata:
+      category: security
+      owasp: "A02:2021 - Cryptographic Failures"
+
+  - id: csharp-tls-no-validation
+    pattern: |
+      ServicePointManager.ServerCertificateValidationCallback = (sender, cert, chain, errors) => true;
+    message: |
+      TLS certificate validation is disabled. This makes the app vulnerable to
+      MITM attacks. Remove this override in production.
+    languages: [csharp]
+    severity: ERROR
+    metadata:
+      category: security
+      owasp: "A02:2021 - Cryptographic Failures"
+
+  - id: csharp-redis-no-tls
+    patterns:
+      - pattern: |
+          ConfigurationOptions.Parse("$CONN")
+      - metavariable-regex:
+          metavariable: $CONN
+          regex: '^(?!.*ssl=true).*'
+    message: |
+      Redis connection string '$CONN' does not appear to enable SSL/TLS.
+      Use 'ssl=true' or 'tls=true' in production Redis connections.
+    languages: [csharp]
+    severity: WARNING
+    metadata:
+      category: security
+      owasp: "A02:2021 - Cryptographic Failures"
+
+  - id: csharp-log-exception-with-sensitive-data
+    pattern: |
+      _logger.$LEVEL($EX.ToString(), ...);
+    message: |
+      Logging the full exception string (.ToString()) may expose sensitive stack
+      trace information. Consider logging only the message or sanitizing the output.
+    languages: [csharp]
+    severity: INFO
+    metadata:
+      category: security
+      owasp: "A09:2021 - Security Logging and Monitoring Failures"
+
+  - id: csharp-missing-grpc-authorize
+    patterns:
+      - pattern: |
+          [ServiceContract]
+          public class $CLASS : $BASE {
+            public override $RET $METHOD($ARG) { ... }
+          }
+      - pattern-not: |
+          [Authorize]
+          public override $RET $METHOD($ARG) { ... }
+    message: |
+      gRPC service method '$METHOD' in '$CLASS' is missing an [Authorize] attribute
+      or equivalent auth check. Ensure all non-public endpoints require authentication.
+    languages: [csharp]
+    severity: WARNING
+    metadata:
+      category: security
+      owasp: "A01:2021 - Broken Access Control"
