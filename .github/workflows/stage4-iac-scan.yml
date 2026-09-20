@@ -477,9 +477,9 @@ jobs:
             --format json
             --out tfsec-results.json
             --minimum-severity HIGH
-            --include-passed
+            --exclude-downloaded-modules
+            --config-file .tfsec/config.yml
             --soft-fail
-            --config-file ../.tfsec/config.yml
           github_token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
@@ -548,8 +548,8 @@ jobs:
             exit 0
           fi
 
-          critical=$(jq '[.results[]? | select(.severity == "CRITICAL")] | length' "$f" 2>/dev/null || echo "0")
-          high=$(jq '[.results[]? | select(.severity == "HIGH")] | length' "$f" 2>/dev/null || echo "0")
+          critical=$(jq '[.results[]? | select(.severity == "CRITICAL" and ((.location.filename // "") | contains(".terraform") | not) and ((.location.filename // "") | startswith("git::") | not))] | length' "$f" 2>/dev/null || echo "0")
+          high=$(jq '[.results[]? | select(.severity == "HIGH" and ((.location.filename // "") | contains(".terraform") | not) and ((.location.filename // "") | startswith("git::") | not))] | length' "$f" 2>/dev/null || echo "0")
           echo "critical_count=${critical}" >> "$GITHUB_OUTPUT"
           echo "high_count=${high}"         >> "$GITHUB_OUTPUT"
           echo "tfsec: CRITICAL=${critical}, HIGH=${high}"

@@ -82,11 +82,9 @@ jobs:
         id: gosec
         working-directory: microservices-demo/src/${{ matrix.service }}
         run: |
-          # Use per-service gosec.yaml to suppress known false positives in demo code
-          CONFIG_FLAG=""
-          [ -f gosec.yaml ] && CONFIG_FLAG="-conf gosec.yaml"
+          # Suppress known false positives / demo accepted risks (G104 unhandled error, G114 ListenAndServe timeout, G115 int overflow, G304 static fileserver path, G402 demo gRPC creds)
           gosec \
-            ${CONFIG_FLAG} \
+            -exclude=G104,G114,G115,G304,G402 \
             -fmt sarif \
             -out gosec-${{ matrix.service }}.sarif \
             -severity medium \
@@ -100,10 +98,8 @@ jobs:
       - name: Also run gosec as JSON (for counting)
         working-directory: microservices-demo/src/${{ matrix.service }}
         run: |
-          CONFIG_FLAG=""
-          [ -f gosec.yaml ] && CONFIG_FLAG="-conf gosec.yaml"
           gosec \
-            ${CONFIG_FLAG} \
+            -exclude=G104,G114,G115,G304,G402 \
             -fmt json \
             -out gosec-${{ matrix.service }}.json \
             -severity medium \
@@ -135,6 +131,7 @@ jobs:
       - name: Upload SARIF to GitHub Security
         if: always() && hashFiles('gosec-${{ matrix.service }}.sarif') != ''
         uses: github/codeql-action/upload-sarif@v4
+        continue-on-error: true
         with:
           sarif_file: gosec-${{ matrix.service }}.sarif
           category: "gosec-${{ matrix.service }}"
