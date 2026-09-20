@@ -1,0 +1,75 @@
+# terraform/terraform.tfvars.example
+# ─────────────────────────────────────────────────────────────────────────────
+# Example variable values — copy to terraform.tfvars and fill in your values.
+# terraform.tfvars is in .gitignore and must NEVER be committed.
+#
+# Usage:
+#   cp terraform.tfvars.example terraform.tfvars
+#   # Edit terraform.tfvars with your values
+#   terraform init
+#   terraform plan
+#   terraform apply
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Required: fill these in ───────────────────────────────────────────────────
+aws_account_id = "123456789012"   # Your 12-digit AWS account ID
+
+# ── Region ────────────────────────────────────────────────────────────────────
+aws_region = "ap-south-1"         # Mumbai; change to your preferred region
+# Common options:
+#   ap-south-1     (Mumbai)
+#   us-east-1      (N. Virginia)
+#   us-west-2      (Oregon)
+#   eu-west-1      (Ireland)
+#   ap-southeast-1 (Singapore)
+
+# ── Project metadata ─────────────────────────────────────────────────────────
+project_name = "security-cicd"
+environment  = "dev"              # dev | staging | prod
+owner        = "Pruthviraj-333"
+
+# ── VPC / Networking ─────────────────────────────────────────────────────────
+vpc_cidr = "10.0.0.0/16"
+
+# Adjust AZs to match your chosen region:
+availability_zones   = ["ap-south-1a", "ap-south-1b", "ap-south-1c"]
+public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+
+single_nat_gateway = true    # false for prod HA (3x cost)
+
+# ── EKS Cluster ───────────────────────────────────────────────────────────────
+cluster_name    = "security-cicd-eks"
+cluster_version = "1.32"
+
+# API endpoint access — restrict to your IP/VPN CIDR in production:
+cluster_endpoint_public_access       = true
+cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]   # ← LOCK DOWN IN PROD
+cluster_endpoint_private_access      = true
+
+# ── Node Group ────────────────────────────────────────────────────────────────
+node_group_instance_types   = ["t3.medium"]   # 2 vCPU, 4 GB
+node_group_ami_type         = "AL2023_x86_64_STANDARD"
+node_group_capacity_type    = "ON_DEMAND"     # SPOT for dev cost savings
+node_group_min_size         = 1
+node_group_max_size         = 4
+node_group_desired_size     = 2
+node_group_disk_size_gb     = 50
+
+# ── Security ──────────────────────────────────────────────────────────────────
+enable_secrets_encryption    = true
+kms_key_deletion_window_days = 30
+enable_guardduty             = false    # Enable in prod
+
+# ── ArgoCD ────────────────────────────────────────────────────────────────────
+argocd_namespace     = "argocd"
+argocd_chart_version = "7.7.23"
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+monitoring_namespace = "monitoring"
+
+# ── Extra tags ────────────────────────────────────────────────────────────────
+additional_tags = {
+  Portfolio   = "DevSecOps-EKS"
+  CostCenter  = "personal-dev"
+}

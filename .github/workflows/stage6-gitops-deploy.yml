@@ -1,0 +1,402 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 6 — GitOps Deploy via ArgoCD
+#
+# This workflow:
+#   1. Authenticates to EKS via IRSA/OIDC (no stored AWS credentials)
+#   2. Updates image tags in K8s manifests to the new signed digest from Stage 5
+#   3. Commits the updated manifests back to the repo (GitOps push)
+#   4. ArgoCD picks up the commit and syncs to the cluster automatically
+#   5. Verifies ArgoCD sync health before marking the deployment as complete
+#   6. Rollback: reverts the manifest commit if ArgoCD reports degraded health
+#
+# Prerequisites:
+#   - EKS cluster provisioned (terraform apply in terraform/)
+#   - ArgoCD installed (terraform apply includes ArgoCD Helm release)
+#   - Signed images in GHCR from Stage 5
+#   - GitHub Actions OIDC trust policy on the deploy IAM role
+#
+# Triggers: only after Stage 5 (image signing) completes successfully on main
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: "Stage 6 · GitOps Deploy (ArgoCD)"
+
+on:
+  # Run automatically after Stage 5 succeeds
+  workflow_run:
+    workflows: ["Stage 5 · Image Build + Cosign Signing"]
+    types: [completed]
+    branches: [main]
+
+  # Allow manual deploy with optional rollback
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Deploy action"
+        required: true
+        default: "sync"
+        type: choice
+        options: [sync, rollback, status]
+      app_name:
+        description: "ArgoCD application name (default: online-boutique-pilot)"
+        required: false
+        default: "online-boutique-pilot"
+
+concurrency:
+  group: "gitops-deploy-${{ github.ref }}"
+  cancel-in-progress: false   # Never cancel an in-flight deployment
+
+permissions:
+  contents: write          # Commit updated manifests back to repo
+  id-token: write          # OIDC for AWS auth (no stored credentials)
+  actions: read            # Read workflow run status
+  packages: read           # Pull from GHCR (image digest lookup)
+
+env:
+  AWS_REGION: ap-south-1
+  CLUSTER_NAME: security-cicd-dev-security-cicd-eks
+  ARGOCD_NAMESPACE: argocd
+  APP_NAME: online-boutique-pilot
+  REGISTRY: ghcr.io/pruthviraj-333
+  # Services and their manifest files
+  FRONTEND_MANIFEST: microservices-demo/kubernetes-manifests/frontend.yaml
+  CARTSERVICE_MANIFEST: microservices-demo/kubernetes-manifests/cartservice.yaml
+  CHECKOUTSERVICE_MANIFEST: microservices-demo/kubernetes-manifests/checkoutservice.yaml
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Gate: only proceed if Stage 5 succeeded (for workflow_run trigger)
+  # ───────────────────────────────────────────────────────────────────────────
+  check-prerequisite:
+    name: "Check Stage 5 Status"
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+
+    steps:
+      - name: Check prerequisite
+        id: check
+        run: |
+          # For workflow_run trigger, check the upstream workflow result
+          upstream_result="${{ github.event.workflow_run.conclusion }}"
+          trigger="${{ github.event_name }}"
+
+          if [ "$trigger" = "workflow_dispatch" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch — proceeding"
+            exit 0
+          fi
+
+          if [ "$upstream_result" = "success" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "Stage 5 succeeded — proceeding with deploy"
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Stage 5 result: '${upstream_result}' — deploy skipped"
+          fi
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB: Update image digests in manifests and push (GitOps commit)
+  # ───────────────────────────────────────────────────────────────────────────
+  update-manifests:
+    name: "Update Image Digests → GitOps Commit"
+    runs-on: ubuntu-latest
+    needs: check-prerequisite
+    if: needs.check-prerequisite.outputs.proceed == 'true'
+    outputs:
+      commit-sha: ${{ steps.commit.outputs.sha }}
+      images-updated: ${{ steps.update.outputs.images_updated }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Install Cosign (for digest verification)
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: "v2.4.1"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Resolve signed image digests ─────────────────────────────────────
+      # We look up the digest of the :latest tag, verify it's signed,
+      # then pin that exact digest in the manifest (immutable reference)
+      - name: Resolve and verify image digests
+        id: resolve
+        run: |
+          OIDC_ISSUER="https://token.actions.githubusercontent.com"
+          CERT_REGEXP="^https://github.com/${{ github.repository }}/.github/workflows/stage5-image-sign.yml"
+
+          for service in frontend cartservice checkoutservice; do
+            IMAGE="${{ env.REGISTRY }}/${service}:latest"
+            echo "Resolving digest for: ${IMAGE}"
+
+            # Get the digest
+            DIGEST=$(docker manifest inspect "${IMAGE}" 2>/dev/null \
+              | jq -r '.config.digest // .manifests[0].digest' 2>/dev/null \
+              || crane digest "${IMAGE}" 2>/dev/null || echo "")
+
+            if [ -z "$DIGEST" ]; then
+              echo "::error::Could not resolve digest for ${IMAGE}"
+              exit 1
+            fi
+
+            # Verify the image is signed before updating the manifest
+            IMAGE_REF="${{ env.REGISTRY }}/${service}@${DIGEST}"
+            echo "Verifying signature: ${IMAGE_REF}"
+
+            if ! cosign verify \
+              --rekor-url https://rekor.sigstore.dev \
+              --certificate-oidc-issuer "${OIDC_ISSUER}" \
+              --certificate-identity-regexp "${CERT_REGEXP}" \
+              "${IMAGE_REF}" > /dev/null 2>&1; then
+              echo "::error::Image ${IMAGE_REF} failed signature verification — deploy BLOCKED"
+              exit 1
+            fi
+
+            echo "✅ ${service}: ${DIGEST} (verified)"
+            echo "${service^^}_DIGEST=${DIGEST}" >> "$GITHUB_ENV"
+          done
+
+      # ── Update manifests with pinned digests ─────────────────────────────
+      - name: Update image references in manifests
+        id: update
+        run: |
+          updated=0
+
+          update_image() {
+            local manifest="$1"
+            local service="$2"
+            local digest_var="${service^^}_DIGEST"
+            local digest="${!digest_var}"
+            local image_ref="${{ env.REGISTRY }}/${service}@${digest}"
+
+            echo "Updating ${manifest}: image → ${image_ref}"
+
+            # Replace the image line in the manifest (matches 'image: <service>' or 'image: ghcr.io/...')
+            sed -i "s|image: ${service}$|image: ${image_ref}|g" "${manifest}"
+            sed -i "s|image: ghcr.io/pruthviraj-333/${service}:.*|image: ${image_ref}|g" "${manifest}"
+
+            if git diff --quiet "${manifest}"; then
+              echo "No change in ${manifest} (digest already pinned)"
+            else
+              echo "Updated ${manifest}"
+              updated=$((updated + 1))
+            fi
+          }
+
+          update_image "${{ env.FRONTEND_MANIFEST }}"      "frontend"
+          update_image "${{ env.CARTSERVICE_MANIFEST }}"   "cartservice"
+          update_image "${{ env.CHECKOUTSERVICE_MANIFEST }}" "checkoutservice"
+
+          echo "images_updated=${updated}" >> "$GITHUB_OUTPUT"
+          echo "Total manifests updated: ${updated}"
+
+      # ── Commit and push the updated manifests ─────────────────────────────
+      - name: Commit updated manifests
+        id: commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          updated="${{ steps.update.outputs.images_updated }}"
+          if [ "$updated" -eq 0 ]; then
+            echo "No manifests changed — skipping commit"
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git add \
+            "${{ env.FRONTEND_MANIFEST }}" \
+            "${{ env.CARTSERVICE_MANIFEST }}" \
+            "${{ env.CHECKOUTSERVICE_MANIFEST }}"
+
+          git commit -m "chore(deploy): pin image digests for pilot services [skip ci]
+
+          Services updated: frontend, cartservice, checkoutservice
+          Triggered by: ${{ github.sha }}
+          Workflow run: ${{ github.run_id }}
+          All images verified signed via Cosign keyless OIDC"
+
+          git push origin main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "::notice::GitOps commit pushed: $(git rev-parse HEAD)"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB: Trigger ArgoCD sync and verify health
+  # ───────────────────────────────────────────────────────────────────────────
+  argocd-sync:
+    name: "ArgoCD Sync + Health Check"
+    runs-on: ubuntu-latest
+    needs: update-manifests
+    if: always() && needs.update-manifests.result == 'success'
+
+    steps:
+      # ── Authenticate to AWS via OIDC (no stored credentials) ─────────────
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/security-cicd-dev-github-actions-deploy
+          role-session-name: github-actions-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── Configure kubectl ─────────────────────────────────────────────────
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --name "${{ env.CLUSTER_NAME }}" \
+            --region "${{ env.AWS_REGION }}"
+
+      # ── Install ArgoCD CLI ────────────────────────────────────────────────
+      - name: Install ArgoCD CLI
+        run: |
+          ARGOCD_VERSION="v2.13.4"
+          curl -sSL -o /usr/local/bin/argocd \
+            "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-amd64"
+          chmod +x /usr/local/bin/argocd
+          argocd version --client
+
+      # ── Port-forward ArgoCD server ────────────────────────────────────────
+      - name: Port-forward ArgoCD server
+        run: |
+          kubectl port-forward svc/argocd-server -n "${{ env.ARGOCD_NAMESPACE }}" 8080:443 &
+          sleep 5
+          echo "ArgoCD UI available at http://localhost:8080"
+
+      # ── Get ArgoCD admin password ─────────────────────────────────────────
+      - name: Get ArgoCD admin password
+        id: argocd-auth
+        run: |
+          ARGOCD_PASSWORD=$(kubectl -n "${{ env.ARGOCD_NAMESPACE }}" \
+            get secret argocd-initial-admin-secret \
+            -o jsonpath='{.data.password}' | base64 -d)
+
+          argocd login localhost:8080 \
+            --username admin \
+            --password "${ARGOCD_PASSWORD}" \
+            --insecure \
+            --grpc-web
+
+          echo "::notice::ArgoCD login successful"
+
+      # ── Handle action: sync | rollback | status ───────────────────────────
+      - name: Execute ArgoCD action
+        id: argocd-action
+        run: |
+          action="${{ github.event.inputs.action || 'sync' }}"
+          app="${{ github.event.inputs.app_name || env.APP_NAME }}"
+
+          case "$action" in
+            sync)
+              echo "Triggering ArgoCD sync for: ${app}"
+              argocd app sync "${app}" \
+                --grpc-web \
+                --retry-limit 3 \
+                --timeout 300 \
+                --prune \
+                --force || true
+              ;;
+            rollback)
+              echo "Rolling back: ${app}"
+              # Get the previous history ID
+              prev_id=$(argocd app history "${app}" --grpc-web \
+                | awk 'NR==3 {print $1}')
+              argocd app rollback "${app}" "${prev_id}" --grpc-web || true
+              ;;
+            status)
+              argocd app get "${app}" --grpc-web
+              exit 0
+              ;;
+          esac
+
+      # ── Wait for ArgoCD sync to complete and check health ────────────────
+      - name: Wait for sync + health check
+        id: health-check
+        run: |
+          app="${{ github.event.inputs.app_name || env.APP_NAME }}"
+          max_wait=300
+          interval=15
+          elapsed=0
+
+          echo "Waiting for ArgoCD sync to complete (max ${max_wait}s)..."
+
+          while [ "$elapsed" -lt "$max_wait" ]; do
+            sync_status=$(argocd app get "${app}" --grpc-web -o json 2>/dev/null \
+              | jq -r '.status.sync.status // "Unknown"')
+            health_status=$(argocd app get "${app}" --grpc-web -o json 2>/dev/null \
+              | jq -r '.status.health.status // "Unknown"')
+
+            echo "[${elapsed}s] Sync: ${sync_status} | Health: ${health_status}"
+
+            if [ "$sync_status" = "Synced" ] && [ "$health_status" = "Healthy" ]; then
+              echo "✅ Application is Synced and Healthy"
+              echo "outcome=PASS" >> "$GITHUB_OUTPUT"
+              break
+            fi
+
+            if [ "$health_status" = "Degraded" ]; then
+              echo "::error::Application health is DEGRADED — triggering rollback"
+              echo "outcome=FAIL" >> "$GITHUB_OUTPUT"
+              break
+            fi
+
+            sleep "$interval"
+            elapsed=$((elapsed + interval))
+          done
+
+          if [ "$elapsed" -ge "$max_wait" ]; then
+            echo "::error::Timeout waiting for sync to complete"
+            echo "outcome=TIMEOUT" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Auto-rollback on failure ──────────────────────────────────────────
+      - name: Auto-rollback on degraded health
+        if: steps.health-check.outputs.outcome == 'FAIL' || steps.health-check.outputs.outcome == 'TIMEOUT'
+        run: |
+          app="${{ github.event.inputs.app_name || env.APP_NAME }}"
+          echo "::warning::Auto-rollback triggered for ${app}"
+
+          # Roll back to previous history entry
+          prev_id=$(argocd app history "${app}" --grpc-web | awk 'NR==3 {print $1}')
+          if [ -n "$prev_id" ]; then
+            argocd app rollback "${app}" "${prev_id}" --grpc-web || true
+            echo "::warning::Rolled back to history ID: ${prev_id}"
+          fi
+
+          exit 1
+
+      # ── Print final deploy summary ────────────────────────────────────────
+      - name: Deploy summary
+        if: always()
+        run: |
+          outcome="${{ steps.health-check.outputs.outcome || 'UNKNOWN' }}"
+          emoji="✅"; [ "$outcome" != "PASS" ] && emoji="🚨"
+
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          # ${emoji} Stage 6 · GitOps Deploy Report
+
+          > Commit: \`${{ github.sha }}\` | Deploy commit: \`${{ needs.update-manifests.outputs.commit-sha }}\`
+
+          | Field | Value |
+          |-------|-------|
+          | Application | \`${{ env.APP_NAME }}\` |
+          | Cluster | \`${{ env.CLUSTER_NAME }}\` |
+          | Registry | \`ghcr.io/pruthviraj-333\` |
+          | Images updated | \`${{ needs.update-manifests.outputs.images-updated }}\` manifests |
+          | Sync outcome | \`${outcome}\` |
+          | Signing | ✅ All images verified before deploy |
+
+          ## ArgoCD Application Status
+          \`\`\`
+          $(argocd app get "${{ env.APP_NAME }}" --grpc-web 2>/dev/null || echo "Could not retrieve status")
+          \`\`\`
+          EOF
