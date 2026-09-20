@@ -147,7 +147,7 @@ variable "cluster_log_retention_days" {
 variable "node_group_instance_types" {
   description = "EC2 instance types for the managed node group"
   type        = list(string)
-  default     = ["t3.medium"]   # t3.medium: 2 vCPU, 4 GB — good for dev/demo
+  default     = ["t3.small"]   # t3.small: 2 vCPU, 2 GB — AWS Free Tier eligible
 }
 
 variable "node_group_ami_type" {

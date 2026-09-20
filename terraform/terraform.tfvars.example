@@ -48,7 +48,7 @@ cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]   # ← LOCK DOWN IN PROD
 cluster_endpoint_private_access      = true
 
 # ── Node Group ────────────────────────────────────────────────────────────────
-node_group_instance_types   = ["t3.medium"]   # 2 vCPU, 4 GB
+node_group_instance_types   = ["t3.small"]    # Free Tier eligible (2 vCPU, 2 GB)
 node_group_ami_type         = "AL2023_x86_64_STANDARD"
 node_group_capacity_type    = "ON_DEMAND"     # SPOT for dev cost savings
 node_group_min_size         = 1
