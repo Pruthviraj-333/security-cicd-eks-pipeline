@@ -1,4 +1,4 @@
-# 🛡️ Security-First CI/CD Pipeline on AWS EKS
+# Security-First CI/CD Pipeline on AWS EKS
 
 > **Portfolio project** — DevSecOps · Supply-chain security · GitOps · AWS EKS
 
@@ -11,17 +11,17 @@ A production-grade, 8-stage security pipeline for the [Online Boutique](https://
 ```
  PR / Push
     │
-    ├─ [1] 🔐 Secrets Scan     Gitleaks + TruffleHog (parallel, SARIF)
-    ├─ [2] 🔬 SAST             gosec (Go matrix) + Semgrep (Go+C#, custom rules)
-    ├─ [3] 📦 SCA              govulncheck + dotnet vuln + Trivy
-    └─ [4] 🏗️  IaC Scan        Checkov + kube-linter + tfsec
+    ├─ [1] Secrets Scan     Gitleaks + TruffleHog (parallel, SARIF)
+    ├─ [2] SAST             gosec (Go matrix) + Semgrep (Go+C#, custom rules)
+    ├─ [3] SCA              govulncheck + dotnet vuln + Trivy
+    └─ [4] IaC Scan         Checkov + kube-linter + tfsec
                     │
               merge to main
                     │
-    ├─ [5] 🔏 Build + Sign      Docker Buildx → GHCR → Cosign keyless + SBOM
-    ├─ [6] 🚀 GitOps Deploy    Manifest update → ArgoCD sync + health gate
-    ├─ [7] 📡 Drift Detection  argocd diff + kubectl (every 30 min, CloudWatch)
-    └─ [8] 📊 Dashboard        CloudWatch metrics + Grafana + GitHub Summary
+    ├─ [5] Build + Sign     Docker Buildx → GHCR → Cosign keyless + SBOM
+    ├─ [6] GitOps Deploy    Manifest update → ArgoCD sync + health gate
+    ├─ [7] Drift Detection  argocd diff + kubectl (every 30 min, CloudWatch)
+    └─ [8] Dashboard        CloudWatch metrics + Grafana + GitHub Summary
 ```
 
 **Pilot services**: `frontend` (Go) · `cartservice` (C# .NET 10) · `checkoutservice` (Go)
@@ -32,14 +32,14 @@ A production-grade, 8-stage security pipeline for the [Online Boutique](https://
 
 | Property | Implementation |
 |----------|----------------|
-| 🔑 No stored AWS keys | GitHub Actions OIDC → scoped IAM role (repo+branch) |
-| 🔏 No signing private keys | Cosign keyless (Sigstore Fulcio + Rekor transparency log) |
-| 📋 SBOM on every image | Syft → SPDX JSON attached as OCI attestation |
-| 🏗️ Least-privilege IAM | Separate IRSA role per workload (not node-level) |
-| 📡 Continuous reconciliation | ArgoCD self-heal + drift detection every 30 min |
-| 🔒 Encrypted at rest | KMS for EKS secrets + EBS volumes + CloudWatch logs |
-| 🛡️ Network isolation | Worker nodes in private subnets — no public IPs |
-| ✅ IaC compliance | All Terraform passes Checkov CKV_AWS_37/38/39/58/337 |
+| No stored AWS keys | GitHub Actions OIDC → scoped IAM role (repo+branch) |
+| No signing private keys | Cosign keyless (Sigstore Fulcio + Rekor transparency log) |
+| SBOM on every image | Syft → SPDX JSON attached as OCI attestation |
+| Least-privilege IAM | Separate IRSA role per workload (not node-level) |
+| Continuous reconciliation | ArgoCD self-heal + drift detection every 30 min |
+| Encrypted at rest | KMS for EKS secrets + EBS volumes + CloudWatch logs |
+| Network isolation | Worker nodes in private subnets — no public IPs |
+| IaC compliance | All Terraform passes Checkov CKV_AWS_37/38/39/58/337 |
 
 ---
 
@@ -144,8 +144,8 @@ cosign verify \
 
 ## Documentation
 
-- 📐 [Architecture](docs/architecture.md) — full system diagram + security controls by layer
-- 📋 [Pipeline Stages](docs/pipeline-stages.md) — tools, failure policies, configs per stage
+- [Architecture](docs/architecture.md) — full system diagram + security controls by layer
+- [Pipeline Stages](docs/pipeline-stages.md) — tools, failure policies, configs per stage
 
 ---
 

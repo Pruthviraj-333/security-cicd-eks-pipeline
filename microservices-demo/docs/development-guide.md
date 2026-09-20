@@ -18,7 +18,7 @@ This doc explains how to build and run the Online Boutique source code locally u
 
 ## Option 1: Google Kubernetes Engine (GKE)
 
-> 💡 Recommended if you're using Google Cloud and want to try it on
+> Recommended if you're using Google Cloud and want to try it on
 > a realistic cluster. **Note**: If your cluster has Workload Identity enabled, 
 > [see these instructions](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity#enable)
 

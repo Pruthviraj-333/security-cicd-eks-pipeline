@@ -24,9 +24,9 @@ Detailed breakdown of all 8 security stages, their tools, triggers, failure poli
 
 | Severity | Action |
 |----------|--------|
-| CRITICAL / HIGH (Gitleaks) | ❌ Block merge |
-| Verified (TruffleHog) | ❌ Block merge |
-| MEDIUM / LOW | ⚠️ Warn, allow merge |
+| CRITICAL / HIGH (Gitleaks) | Block merge |
+| Verified (TruffleHog) | Block merge |
+| MEDIUM / LOW | Warn, allow merge |
 
 ### Jobs
 ```
@@ -64,9 +64,9 @@ trufflehog-scan ────┘
 
 | Finding | Action |
 |---------|--------|
-| gosec HIGH/CRITICAL | ❌ Block merge |
-| Semgrep ERROR-level | ❌ Block merge |
-| WARNING / MEDIUM | ⚠️ Warn, allow merge |
+| gosec HIGH/CRITICAL | Block merge |
+| Semgrep ERROR-level | Block merge |
+| WARNING / MEDIUM | Warn, allow merge |
 
 ---
 
@@ -89,10 +89,10 @@ trufflehog-scan ────┘
 
 | Severity | Action |
 |----------|--------|
-| CRITICAL (any tool) | ❌ Block merge |
-| HIGH (any tool) | ❌ Block merge |
-| MEDIUM | ⚠️ Warn |
-| Unfixable (no upstream patch) | ℹ️ Info only (Trivy `--ignore-unfixed`) |
+| CRITICAL (any tool) | Block merge |
+| HIGH (any tool) | Block merge |
+| MEDIUM | Warn |
+| Unfixable (no upstream patch) | Info only (Trivy `--ignore-unfixed`) |
 
 ---
 
