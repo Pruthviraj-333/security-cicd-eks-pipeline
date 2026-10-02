@@ -6,6 +6,14 @@ A production-grade, 8-stage security pipeline for the [Online Boutique](https://
 
 ---
 
+## Architecture Overview
+
+<p align="center">
+  <img src="docs/images/architecture.png" alt="Security-First CI/CD and GitOps Pipeline on AWS EKS" width="100%"/>
+</p>
+
+---
+
 ## Pipeline Overview
 
 ```
