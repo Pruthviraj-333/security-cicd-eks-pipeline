@@ -11,7 +11,7 @@ This project implements a production-grade, security-first CI/CD pipeline for th
 ## System Architecture
 
 <p align="center">
-  <img src="images/architecture.png" alt="Security-First CI/CD and GitOps Pipeline on AWS EKS" width="100%"/>
+  <img src="images/system-architecture.png" alt="Security-First CI/CD and GitOps Pipeline on AWS EKS" width="100%"/>
 </p>
 
 *Figure 1: End-to-end architecture showing GitHub Actions pre-merge security gates, GHCR image signing with Cosign, and GitOps continuous reconciliation on AWS EKS.*
